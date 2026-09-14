@@ -29,6 +29,18 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     llm_model_id: str = "gpt-4o-mini"
 
+    # --- Interface ---
+    # Origins allowed to call this API. The frontend development server runs on a
+    # different port, which the browser treats as a separate origin, so it must be
+    # listed explicitly. Comma-separated to keep it easy to set as one env var.
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        """`cors_origins` split into a list, ignoring blanks and stray spaces."""
+
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
     # Pydantic-settings configuration: read from a local `.env` if present,
     # ignore unknown env vars, and treat variable names case-insensitively.
     model_config = SettingsConfigDict(
