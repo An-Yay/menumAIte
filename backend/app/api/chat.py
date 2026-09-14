@@ -25,6 +25,7 @@ from strands import Agent
 from app.agent.agent import build_agent, extract_suggestions
 from app.api.events import EventTranslator
 from app.models import COMMON_MEALS
+from app.telemetry import collected_generations, start_collecting
 
 router = APIRouter(tags=["chat"])
 
@@ -73,6 +74,10 @@ async def _stream(message: str, session_id: str) -> AsyncIterator[str]:
 
     translator = EventTranslator()
 
+    # Begin collecting the model calls made while answering this message, so the
+    # turn's cost and token trace can be reported at the end.
+    start_collecting()
+
     # Sent first so the client can store the session id before anything else.
     yield _sse({"type": "session", "session_id": session_id})
     yield _sse(translator.start())
@@ -87,12 +92,26 @@ async def _stream(message: str, session_id: str) -> AsyncIterator[str]:
         # conversation so the interface can render restaurant cards. This is
         # skipped for turns that did not produce recommendations (for example a
         # clarifying question), where there is nothing to structure.
-        suggestions = await extract_suggestions(agent)
+        suggestions = await extract_suggestions(agent, review_context=message)
         if suggestions.suggestions:
             yield _sse(
                 {
                     "type": "suggestions",
                     "suggestions": [s.model_dump(mode="json") for s in suggestions.suggestions],
+                }
+            )
+
+        # Report the model calls made this turn: per-call tokens and estimated
+        # cost, plus a total, for the trace panel.
+        generations = collected_generations()
+        if generations:
+            total_cost = sum(g.cost_usd or 0.0 for g in generations)
+            yield _sse(
+                {
+                    "type": "generations",
+                    "generations": [g.model_dump() for g in generations],
+                    "total_tokens": sum(g.total_tokens for g in generations),
+                    "total_cost_usd": round(total_cost, 6),
                 }
             )
 

@@ -411,12 +411,14 @@ def _clean_caveat(text: str) -> str | None:
     return cleaned
 
 
-def assemble_suggestion(pick: SuggestionPick) -> Suggestion | None:
+async def assemble_suggestion(
+    pick: SuggestionPick, *, review_context: str = "", output_language: str = "en"
+) -> Suggestion | None:
     """Build one `Suggestion` from a model's pick and the data already gathered.
 
     Returns None when the restaurant itself was never looked up (an invalid
     place_id from the model), which the caller drops rather than showing an empty
-    card.
+    card. Reviews are fetched here as a fallback if the agent did not analyse them.
     """
 
     restaurant = _restaurant_cache.get(pick.place_id)
@@ -458,20 +460,77 @@ def assemble_suggestion(pick: SuggestionPick) -> Suggestion | None:
     if menu and menu.retrieval_note and menu.retrieval_note not in caveats:
         caveats.append(menu.retrieval_note)
 
+    # Every recommended restaurant should carry a review summary, since positive
+    # and negative reviews are a core part of the answer. The agent is supposed to
+    # call the review tools during its run, but being autonomous it sometimes skips
+    # them; when a card has no cached insight, fetch and analyse the reviews here so
+    # the card is never missing them.
+    insight = _review_insight_cache.get(pick.place_id)
+    if insight is None:
+        insight = await _ensure_review_insight(
+            place_id=pick.place_id,
+            context=review_context,
+            output_language=output_language,
+        )
+
     return Suggestion(
         restaurant=restaurant,
         reasoning=pick.reasoning,
         recommended_items=recommended,
-        review_insight=_review_insight_cache.get(pick.place_id),
+        review_insight=insight,
         menu_url=menu.menu_url if menu else None,
         caveats=caveats,
     )
 
 
-def assemble_suggestions(picks: list[SuggestionPick]) -> SuggestionList:
-    """Build the full `SuggestionList` from the model's picks."""
+async def _ensure_review_insight(
+    *, place_id: str, context: str, output_language: str
+) -> ReviewInsight | None:
+    """Fetch and analyse a restaurant's reviews if not already done this session.
 
-    suggestions = [s for pick in picks if (s := assemble_suggestion(pick)) is not None]
+    Returns None on any failure, so a card can still be shown without a review
+    summary rather than the whole recommendation failing.
+    """
+
+    try:
+        reviews = _review_cache.get(place_id)
+        if reviews is None:
+            reviews = await GooglePlacesProvider().get_reviews(place_id, limit=5)
+            _review_cache[place_id] = reviews
+        if not reviews:
+            return None
+        insight = await _analyze_reviews(
+            reviews=reviews,
+            restaurant_place_id=place_id,
+            context=context,
+            output_language=output_language,
+            llm=OpenAIProvider(),
+        )
+        _review_insight_cache[place_id] = insight
+        return insight
+    except (PlacesError, Exception):  # noqa: BLE001 - reviews are best-effort
+        return None
+
+
+async def assemble_suggestions(
+    picks: list[SuggestionPick],
+    *,
+    review_context: str = "",
+    output_language: str = "en",
+) -> SuggestionList:
+    """Build the full `SuggestionList` from the model's picks.
+
+    `review_context` and `output_language` are used only when a card is missing its
+    review summary and the reviews have to be fetched here as a fallback.
+    """
+
+    suggestions: list[Suggestion] = []
+    for pick in picks:
+        built = await assemble_suggestion(
+            pick, review_context=review_context, output_language=output_language
+        )
+        if built is not None:
+            suggestions.append(built)
     return SuggestionList(suggestions=suggestions)
 
 

@@ -68,7 +68,7 @@ async def analyze_reviews(
 
     try:
         data = await llm.complete_json(
-            system=_SYSTEM, prompt=prompt, schema_hint=_SCHEMA_HINT
+            system=_SYSTEM, prompt=prompt, schema_hint=_SCHEMA_HINT, label="analyse_reviews"
         )
     except LLMError:
         # Analysis failure should not sink the recommendation; return an empty

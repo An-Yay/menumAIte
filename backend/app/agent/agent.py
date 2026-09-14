@@ -86,7 +86,9 @@ def build_agent() -> Agent:
     )
 
 
-async def extract_suggestions(agent: Agent) -> SuggestionList:
+async def extract_suggestions(
+    agent: Agent, *, review_context: str = "", output_language: str = "en"
+) -> SuggestionList:
     """Pull structured recommendations out of a completed conversation.
 
     Run after the agent has answered, so the interface can render restaurant cards
@@ -107,4 +109,6 @@ async def extract_suggestions(agent: Agent) -> SuggestionList:
         logger.warning("Could not extract suggestion picks: %s", exc)
         return SuggestionList(suggestions=[])
 
-    return assemble_suggestions(picks.picks)
+    return await assemble_suggestions(
+        picks.picks, review_context=review_context, output_language=output_language
+    )

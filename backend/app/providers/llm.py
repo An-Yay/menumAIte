@@ -19,6 +19,7 @@ from typing import Any, Protocol
 import httpx
 
 from app.config import get_settings
+from app.telemetry import record_generation
 
 
 class LLMError(RuntimeError):
@@ -34,12 +35,14 @@ class LLMProvider(Protocol):
         system: str,
         prompt: str,
         schema_hint: str,
+        label: str = "generation",
     ) -> dict[str, Any]:
         """Return a JSON object produced by the model.
 
         `system` sets behaviour and rules, `prompt` carries the task and data, and
-        `schema_hint` describes the JSON shape expected back. Implementations must
-        return already-parsed JSON so callers can validate it into domain models.
+        `schema_hint` describes the JSON shape expected back. `label` names the
+        call for the telemetry trace (for example "extract_menu"). Implementations
+        must return already-parsed JSON so callers can validate it into models.
         """
         ...
 
@@ -100,7 +103,7 @@ class OpenAIProvider:
         self._timeout = timeout
 
     async def complete_json(
-        self, *, system: str, prompt: str, schema_hint: str
+        self, *, system: str, prompt: str, schema_hint: str, label: str = "generation"
     ) -> dict[str, Any]:
         # The schema hint is folded into the user prompt: JSON mode guarantees
         # valid JSON syntax but not a specific shape, so the expected shape still
@@ -160,6 +163,15 @@ class OpenAIProvider:
             message = data.get("error", {}).get("message", response.text)
             raise LLMError(f"OpenAI error (HTTP {response.status_code}): {message}")
 
+        # Record token usage for the request's telemetry trace before returning.
+        usage = data.get("usage") or {}
+        record_generation(
+            label=label,
+            model=data.get("model", self._model),
+            input_tokens=usage.get("prompt_tokens", 0),
+            output_tokens=usage.get("completion_tokens", 0),
+        )
+
         content = data["choices"][0]["message"]["content"]
         return extract_json(content)
 
@@ -174,6 +186,6 @@ class StubLLMProvider:
     """
 
     async def complete_json(
-        self, *, system: str, prompt: str, schema_hint: str
+        self, *, system: str, prompt: str, schema_hint: str, label: str = "generation"
     ) -> dict[str, Any]:
         return {}

@@ -65,7 +65,7 @@ async def resolve_dietary_profile(
 
     try:
         data = await llm.complete_json(
-            system=_SYSTEM, prompt=prompt, schema_hint=_SCHEMA_HINT
+            system=_SYSTEM, prompt=prompt, schema_hint=_SCHEMA_HINT, label="dietary_profile"
         )
     except LLMError:
         data = {}

@@ -116,7 +116,7 @@ async def extract_and_translate_menu(
 
     try:
         data = await llm.complete_json(
-            system=_SYSTEM, prompt=prompt, schema_hint=_SCHEMA_HINT
+            system=_SYSTEM, prompt=prompt, schema_hint=_SCHEMA_HINT, label="extract_menu"
         )
     except LLMError as exc:
         return Menu(
