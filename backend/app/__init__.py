@@ -1,0 +1,1 @@
+"""menumAIte backend application package."""
