@@ -40,22 +40,18 @@ from app.models import (
 _TOOL_STEPS: dict[str, PipelineStep] = {
     "resolve_dietary_profile": PipelineStep.INTAKE,
     "discover_restaurants": PipelineStep.DISCOVER,
-    "read_menu": PipelineStep.FETCH_MENU,
-    "extract_menu_items": PipelineStep.TRANSLATE_MENU,
+    "get_menu": PipelineStep.FETCH_MENU,
     "get_restaurant_reviews": PipelineStep.ANALYSE_REVIEWS,
     "analyse_restaurant_reviews": PipelineStep.CONTEXT_REVIEW_SEARCH,
-    "search_menu_online": PipelineStep.FETCH_MENU,
 }
 
 # Short, human-readable descriptions shown while each tool runs.
 _TOOL_MESSAGES: dict[str, str] = {
     "resolve_dietary_profile": "Working out what these dietary needs mean",
     "discover_restaurants": "Searching for restaurants",
-    "read_menu": "Reading the menu from the restaurant's website",
-    "extract_menu_items": "Extracting and translating menu items",
+    "get_menu": "Reading and translating the menu",
     "get_restaurant_reviews": "Fetching reviews",
     "analyse_restaurant_reviews": "Reading the positive and negative reviews",
-    "search_menu_online": "Searching the web for a menu the website did not provide",
 }
 
 

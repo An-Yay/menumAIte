@@ -31,19 +31,9 @@ from app.tools.web_search import search_menu_online as _search_menu_online
 # to the process, which is sufficient for a locally run session.
 _review_cache: dict[str, list[Review]] = {}
 
-# Menu text is cached the same way, keyed by the URL it was read from.
-#
-# This exists because menu text is large — a PDF menu runs to thousands of
-# characters — and routing it out to the model and back in as a tool argument was
-# both expensive and unreliable: the text arrived truncated and extraction found
-# nothing, even though the crawler had read a full priced menu. Keeping the text
-# here means the model passes a short reference instead of the whole document.
-_menu_text_cache: dict[str, str] = {}
-
-# How much menu text to show the model in the `read_menu` result. Enough for it to
-# see that a real menu was found, without spending the context that the full
-# document would cost.
-_MENU_PREVIEW_CHARS = 600
+# Menu text is no longer cached between tool calls: `get_menu` crawls and extracts
+# within a single call, so the large raw text never leaves the server or passes
+# through the model's context.
 
 
 @tool
@@ -116,121 +106,110 @@ async def discover_restaurants(
 
 
 @tool
-async def read_menu(website_url: str) -> dict[str, Any]:
-    """Read the menu text from a restaurant's website.
-
-    Fetches the site, finds the menu page and extracts its text. Call this before
-    `extract_menu_items`.
-
-    Args:
-        website_url: The restaurant's website, from `discover_restaurants`.
-
-    Returns:
-        The menu page URL, a short preview of the menu text, whether prices appear
-        to be published, and a note explaining any problem (for example a
-        JavaScript-only site, an image-only PDF, or a domain that no longer belongs
-        to the restaurant).
-
-        The full menu text is held server-side. Pass the returned `menu_url` to
-        `extract_menu_items` as `menu_url` and it will be picked up from there — you
-        do not need to copy the menu text yourself.
-
-        When `has_menu_text` is false, tell the traveller the menu could not be read
-        and give them the link instead of guessing at its contents.
-    """
-
-    result = await MenuCrawler().crawl(website_url)
-
-    # Keyed by menu_url when there is one, otherwise by the site, so the extraction
-    # step can retrieve the full text without it passing through the model.
-    cache_key = result.menu_url or website_url
-    if result.text:
-        _menu_text_cache[cache_key] = result.text
-
-    return {
-        "menu_url": cache_key,
-        "text_preview": result.text[:_MENU_PREVIEW_CHARS],
-        "text_length": len(result.text),
-        "has_menu_text": result.has_menu_text,
-        "prices_present": result.prices_present,
-        "note": result.note,
-        "pages_visited": result.pages_visited,
-    }
-
-
-@tool
-async def extract_menu_items(
-    menu_url: str,
+async def get_menu(
+    restaurant_name: str,
+    city: str,
+    website_url: str,
     restaurant_place_id: str,
+    currency: str,
     output_language: str = "en",
     forbidden_ingredients: list[str] | None = None,
-    currency: str | None = None,
 ) -> dict[str, Any]:
-    """Turn a menu that `read_menu` found into structured, translated dishes.
+    """Read a restaurant's menu and return its dishes, translated and priced.
 
-    Call this after `read_menu`, passing the `menu_url` it returned. The menu text
-    is retrieved server-side, so you do not need to pass it.
+    Does the whole job in one call: reads the restaurant's website (including PDF
+    menus), extracts and translates the dishes, flags them against the traveller's
+    dietary needs, and falls back to searching the web if the website cannot be
+    read. Call it once per shortlisted restaurant.
 
     Args:
-        menu_url: The `menu_url` returned by `read_menu` for this restaurant.
-        restaurant_place_id: The restaurant's place id.
+        restaurant_name: The restaurant's name, used if a web search is needed.
+        city: The city it is in, so a search cannot match a namesake elsewhere.
+        website_url: Its website, from `discover_restaurants`.
+        restaurant_place_id: Its place id, from `discover_restaurants`.
+        currency: ISO 4217 code for the local currency, e.g. "EUR" in Barcelona,
+            "AUD" in Sydney, "INR" in Mumbai. Menus often print prices with no
+            currency, so this is attached to them.
         output_language: Language to translate dishes into.
-        forbidden_ingredients: Ingredients the traveller avoids, from the dietary
-            profile, used to flag whether each dish is suitable.
-        currency: ISO 4217 code for the restaurant's country, e.g. "EUR" for Spain
-            or "INR" for India. Menus frequently print prices with no currency at
-            all, so pass the local currency of the city you searched and it will be
-            attached to those prices.
+        forbidden_ingredients: Ingredients the traveller avoids, used to flag each
+            dish as suitable or not.
 
     Returns:
-        The menu's source language, whether it was translated, and the dishes. Each
-        dish carries a price only when the menu published one: when
-        `price_available` is false there is no price to show and you must say so
-        rather than estimating. Always show the currency alongside a price.
+        `items` holds the dishes. Each has a price only when the menu actually
+        published one: where `price_available` is false, say the price is not listed
+        rather than estimating. `source` says where the menu came from, and when it
+        is a listing or delivery site rather than the restaurant, mention that
+        because those prices can be stale.
+
+        When `menu_available` is false, no menu could be read. Say so, give the link,
+        and do not name any dishes for that restaurant.
     """
 
-    raw_text = _menu_text_cache.get(menu_url, "")
-    if not raw_text:
-        # Either `read_menu` was not called for this restaurant, or it found nothing.
+    crawl = await MenuCrawler().crawl(website_url)
+
+    menu = None
+    source = "the restaurant's website"
+
+    if crawl.has_menu_text:
+        menu = await _extract_menu(
+            raw_text=crawl.text,
+            restaurant_place_id=restaurant_place_id,
+            menu_url=crawl.menu_url,
+            output_language=output_language,
+            forbidden_ingredients=forbidden_ingredients or [],
+            llm=OpenAIProvider(),
+            fallback_currency=currency,
+        )
+
+    # Fall back to searching the web only when reading the site produced nothing.
+    # Doing this here, rather than leaving it to the agent, means the fallback is
+    # never forgotten and never used unnecessarily.
+    if menu is None or not menu.items:
+        search = await _search_menu_online(
+            restaurant_name=restaurant_name, city=city, website_url=website_url
+        )
+        found = search.get("items") or []
+        if found:
+            source = search.get("source_name") or "a web search"
+            return {
+                "menu_available": True,
+                "menu_url": search.get("menu_url") or crawl.menu_url,
+                "source": source,
+                "source_language": None,
+                "items": [
+                    {
+                        "name": item.get("name"),
+                        "description": item.get("description"),
+                        "price_amount": item.get("price_amount"),
+                        "price_currency": currency if item.get("price_available") else None,
+                        "price_available": bool(item.get("price_available")),
+                        "dietary_tags": [],
+                        "matches_requirements": None,
+                    }
+                    for item in found
+                ],
+                "note": search.get("note"),
+            }
+
         return {
-            "items": [],
             "menu_available": False,
+            "menu_url": crawl.menu_url or website_url,
+            "items": [],
+            "note": crawl.note or search.get("note") or "No menu could be read.",
             "instruction": (
-                "No menu text is held for that menu_url. Call read_menu for this "
-                "restaurant first, and use the menu_url it returns. Do not list any "
-                "dishes for this restaurant until a menu has actually been read."
+                "No menu was read for this restaurant. Do NOT list any dishes for "
+                "it, and do not turn dishes mentioned in reviews into menu items. "
+                "Say the menu could not be read, give the link, and base any "
+                "recommendation on reviews only, clearly attributed to reviewers."
             ),
         }
 
-    menu = await _extract_menu(
-        raw_text=raw_text,
-        restaurant_place_id=restaurant_place_id,
-        menu_url=menu_url,
-        output_language=output_language,
-        forbidden_ingredients=forbidden_ingredients or [],
-        llm=OpenAIProvider(),
-        fallback_currency=currency,
-    )
-
     payload = menu.model_dump()
-
-    # A system prompt alone has proven insufficient here: when extraction returns
-    # nothing, the model tends to fill the gap with dishes mentioned in reviews and
-    # present them as menu items. Returning an explicit instruction alongside the
-    # empty result makes the constraint part of the tool's own output, which the
-    # model treats as data rather than as advice it can weigh up.
-    if not menu.items:
-        payload["menu_available"] = False
-        payload["instruction"] = (
-            "No menu was read for this restaurant. You must NOT list any dishes "
-            "for it, and must NOT use dishes mentioned in reviews as menu items or "
-            "as 'menu highlights'. State that the menu could not be read, give the "
-            "menu link if there is one, and base any recommendation on reviews "
-            "only, clearly attributed to reviewers."
-        )
-    else:
-        payload["menu_available"] = True
-
+    payload["menu_available"] = True
+    payload["source"] = source
+    payload["pages_visited"] = crawl.pages_visited
+    if crawl.note:
+        payload["note"] = crawl.note
     return payload
 
 
@@ -290,41 +269,18 @@ async def analyse_restaurant_reviews(
     return insight.model_dump()
 
 
-@tool
-async def search_menu_online(
-    restaurant_name: str, city: str, website_url: str | None = None
-) -> dict[str, Any]:
-    """Search the web for a menu when the restaurant's own website could not be read.
-
-    Use this ONLY as a fallback: after `read_menu` returned `has_menu_text: false`,
-    or after `extract_menu_items` found no dishes. It is slower and costs more than
-    reading the website, so do not call it when a menu has already been read.
-
-    Args:
-        restaurant_name: The restaurant's name.
-        city: The city it is in, to avoid matching a different branch or namesake.
-        website_url: Its official site, if known, to help identify the right menu.
-
-    Returns:
-        Any dishes found, the page they came from, and `source_name` describing
-        which site that was. When the source is a listing or delivery site rather
-        than the restaurant itself, tell the traveller so, because such prices can
-        be out of date or specific to delivery. Prices appear only where genuinely
-        published.
-    """
-
-    return await _search_menu_online(
-        restaurant_name=restaurant_name, city=city, website_url=website_url
-    )
-
-
-# The complete toolset handed to the agent.
+# The toolset handed to the agent.
+#
+# Reading a menu used to be two tools (fetch the page, then extract from it) plus a
+# separate web-search fallback. The model regularly called the first and skipped the
+# rest, and then recommended dishes it had never actually read. Those steps are not
+# decisions — a menu is always worth structuring once fetched — so they were merged
+# into `get_menu`. The agent keeps the genuine judgements: which restaurants to
+# shortlist, which dishes to suggest, and when to ask a clarifying question.
 AGENT_TOOLS = [
     resolve_dietary_profile,
     discover_restaurants,
-    read_menu,
-    extract_menu_items,
+    get_menu,
     get_restaurant_reviews,
     analyse_restaurant_reviews,
-    search_menu_online,
 ]
