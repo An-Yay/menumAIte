@@ -23,11 +23,13 @@ Design priorities
 from __future__ import annotations
 
 import asyncio
+import io
 import re
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 
 import httpx
+from pypdf import PdfReader
 from selectolax.parser import HTMLParser
 
 # Presented as a normal browser with a contact hint, so site owners can identify
@@ -42,8 +44,11 @@ _USER_AGENT = (
 # longer than this is reported as unreadable rather than holding up the response.
 _TIMEOUT_SECONDS = 8.0
 _MAX_MENU_PAGES = 3  # Candidate menu pages fetched per restaurant, in parallel.
-_MAX_BYTES = 2_000_000  # Skip anything larger; menus are small documents.
+# Menu PDFs are image-heavy and routinely a few megabytes, so the size cap has to
+# be generous enough to admit them while still refusing anything unreasonable.
+_MAX_BYTES = 12_000_000
 _MAX_TEXT_CHARS = 12_000  # Text budget handed to the extraction step.
+_MAX_PDF_PAGES = 6  # Menus are short; bounds work on oversized documents.
 
 # Words that identify a menu page, across the languages a traveller is likely to
 # meet in Europe and beyond. Matched against both link URLs and link text.
@@ -92,6 +97,41 @@ _PRICE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Printed menus, especially PDFs, usually state the currency once in a heading and
+# then list bare numbers such as "12,50" or "9.95" beside each dish. Those are not
+# matched by the pattern above, so this second pattern recognises the bare form.
+# It is intentionally narrow — one or two digits, then exactly two decimals — which
+# is the shape of a dish price and not of a year, a phone number or a street number.
+_BARE_PRICE_PATTERN = re.compile(r"\b\d{1,2}[.,]\d{2}\b")
+
+
+def count_prices(text: str) -> int:
+    """Estimate how many prices a menu page publishes.
+
+    Counts explicitly marked prices first (``€12,50``). If none are found, falls
+    back to counting bare decimals such as ``12,50``.
+
+    The bare count deliberately does NOT require a currency symbol anywhere on the
+    page. Printed menus, and PDF menus especially, very often omit the currency
+    entirely because it is obvious to a diner standing in the restaurant. An
+    earlier version of this function insisted on currency context and consequently
+    reported "no prices published" for a menu containing 118 of them. The currency
+    for a dish is instead inferred from the restaurant's country, which is
+    information we already hold.
+
+    A run of bare decimals is only treated as prices when there are several of
+    them, since a page with one or two stray decimals is more likely to be quoting
+    something else.
+    """
+
+    explicit = len(_PRICE_PATTERN.findall(text))
+    if explicit:
+        return explicit
+
+    bare = len(_BARE_PRICE_PATTERN.findall(text))
+    # Three or more suggests a price column rather than incidental numbers.
+    return bare if bare >= 3 else 0
+
 # Tags whose contents are never useful menu text.
 _NOISE_TAGS = ("script", "style", "noscript", "svg", "iframe", "nav", "footer")
 
@@ -118,6 +158,36 @@ _SPAM_WORDS = (
     "slot", "togel", "casino", "gacor", "judi", "poker", "betting", "situs",
     "viagra", "crypto airdrop", "loan approval",
 )
+
+
+def _pdf_text(content: bytes, max_pages: int = _MAX_PDF_PAGES) -> str:
+    """Extract text from a menu PDF.
+
+    Restaurants very often publish the menu only as a PDF, and in practice those
+    PDFs are frequently the one place prices are actually printed, so they are
+    worth reading rather than skipping.
+
+    Only the first few pages are read: menus are short, and this bounds the work
+    done on an unexpectedly large document. A PDF built from scanned images has no
+    text layer and yields nothing, which the caller reports honestly instead of
+    guessing at the contents.
+    """
+
+    try:
+        reader = PdfReader(io.BytesIO(content))
+    except Exception:  # noqa: BLE001 - pypdf raises a variety of parse errors
+        return ""
+
+    parts: list[str] = []
+    for page in reader.pages[:max_pages]:
+        try:
+            parts.append(page.extract_text() or "")
+        except Exception:  # noqa: BLE001 - a single bad page should not abort
+            continue
+
+    # PDF extraction produces ragged line breaks; collapse them so the text reads
+    # as continuous content for the extraction step.
+    return re.sub(r"\s{2,}", " ", " ".join(parts)).strip()
 
 
 def food_relevance(text: str) -> int:
@@ -353,10 +423,22 @@ class MenuCrawler:
         if len(content) > _MAX_BYTES:
             return MenuPage(url=url, note="page too large to read")
 
-        # PDF and image menus are common and need a different reader; report them
-        # clearly instead of guessing at their contents.
+        # A PDF menu is read directly. This matters for prices: several
+        # restaurants publish a priced menu only as a PDF while their web pages
+        # carry no prices at all.
         if "application/pdf" in content_type or url.lower().endswith(".pdf"):
-            return MenuPage(url=url, note="menu is published as a PDF")
+            text = _pdf_text(content)
+            if not text:
+                # No text layer, so the PDF is a scan or an export of images.
+                return MenuPage(
+                    url=url,
+                    note="menu is a PDF with no readable text (probably scanned)",
+                )
+            page = MenuPage(url=url, text=text)
+            page.price_hits = count_prices(text)
+            page.food_score = food_relevance(text)
+            return page
+
         if content_type.startswith("image/"):
             return MenuPage(url=url, note="menu is published as an image")
         if "html" not in content_type and content_type:
@@ -366,7 +448,7 @@ class MenuCrawler:
         text = _clean_text(html)
 
         page = MenuPage(url=str(response.url), text=text, html=html)
-        page.price_hits = len(_PRICE_PATTERN.findall(text))
+        page.price_hits = count_prices(text)
         page.food_score = food_relevance(text)
 
         # Very little text usually means the page is rendered by JavaScript, which

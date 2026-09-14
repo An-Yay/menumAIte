@@ -52,18 +52,30 @@ _SCHEMA_HINT = """\
 }"""
 
 
-def _sanitize_item(item: dict) -> dict:
+def _sanitize_item(item: dict, fallback_currency: str | None = None) -> dict:
     """Normalise one model-produced menu item before validation.
 
-    Models sometimes return an explicit ``null`` for a list field instead of
-    omitting it, which bypasses Pydantic's `default_factory` (that only applies
-    when a key is missing). Coercing such values here keeps the domain model's
-    field definitions simple and avoids repeating this null-handling in every
-    caller.
+    Two corrections are applied, both from observed model behaviour:
+
+    * An explicit ``null`` for a list field bypasses Pydantic's `default_factory`,
+      which only applies when a key is missing, so such values are coerced.
+    * A price is often printed on a menu without any currency, in which case the
+      model returns an amount and no currency code. The currency inferred from the
+      restaurant's country is filled in, because a bare number is of little use to
+      a traveller. `price_available` is also reconciled with whether an amount is
+      actually present, so the two can never disagree.
     """
 
     if item.get("dietary_tags") is None:
         item["dietary_tags"] = []
+
+    has_amount = item.get("price_amount") is not None
+    # Trust the amount over the flag: models occasionally set one without the other.
+    item["price_available"] = has_amount
+
+    if has_amount and not item.get("price_currency") and fallback_currency:
+        item["price_currency"] = fallback_currency
+
     return item
 
 
@@ -76,6 +88,7 @@ async def extract_and_translate_menu(
     forbidden_ingredients: list[str],
     llm: LLMProvider,
     max_items: int = 40,
+    fallback_currency: str | None = None,
 ) -> Menu:
     """Parse and translate menu text into a structured `Menu`.
 
@@ -122,7 +135,8 @@ async def extract_and_translate_menu(
         )
 
     items = [
-        MenuItem.model_validate(_sanitize_item(item)) for item in raw_items[:max_items]
+        MenuItem.model_validate(_sanitize_item(item, fallback_currency))
+        for item in raw_items[:max_items]
     ]
 
     source_language = data.get("source_language")
