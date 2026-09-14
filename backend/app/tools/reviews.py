@@ -23,7 +23,10 @@ You analyse restaurant reviews for a traveller.
   or paraphrases from reviews that speak directly to that context. If none do,
   return an empty list rather than stretching.
 - Base everything only on the reviews provided; do not invent experiences.
-- Write your output in the requested output language.
+- Write your output in the SAME LANGUAGE as the traveller's context text below
+  (for example, if their context is in German, write the points in German). The
+  reviews themselves may be in other languages; translate your findings into the
+  traveller's language.
 Reply with a single JSON object and nothing else."""
 
 _SCHEMA_HINT = """\
@@ -59,9 +62,17 @@ async def analyze_reviews(
         f"[{i + 1}] (rating={r.rating}, lang={r.language}) {r.text}"
         for i, r in enumerate(reviews)
     )
+    # The traveller's context is their own message, so it carries the language to
+    # answer in. The reviews are often in a different language and must not decide
+    # the output language; the instruction below is emphatic because the reviews'
+    # language otherwise tends to win.
     prompt = (
-        f"Output language: {output_language}\n"
         f"Traveller's context: {context}\n\n"
+        "Detect the language of the traveller's context above, and write ALL of "
+        "your output (positive_points, negative_points, context_matches) in THAT "
+        "language. The reviews below may be in a different language; translate your "
+        "findings into the traveller's language. Do not answer in the reviews' "
+        "language.\n\n"
         f"Reviews:\n{joined}\n\n"
         "Analyse these reviews as JSON."
     )
