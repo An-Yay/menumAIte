@@ -197,10 +197,26 @@ export interface Observation {
 // backend/app/api/chat.py). `session` and `text`/`final` support the live chat
 // reply; `suggestions` carries the structured cards; `observation` feeds the
 // reasoning panel.
+/** One model call in a turn's telemetry trace. */
+export interface GenerationRecord {
+  label: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  cost_usd?: number | null;
+}
+
 export type AgentStreamEvent =
   | { type: "session"; session_id: string }
   | { type: "observation"; observation: Observation }
   | { type: "text"; text: string }
   | { type: "final"; text: string; trace_id?: string }
   | { type: "suggestions"; suggestions: Suggestion[] }
+  | {
+      type: "generations";
+      generations: GenerationRecord[];
+      total_tokens: number;
+      total_cost_usd: number;
+    }
   | { type: "error"; message: string };

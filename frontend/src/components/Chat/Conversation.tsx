@@ -17,7 +17,7 @@
 import { useEffect, useRef } from "react";
 import { Composer } from "./Composer";
 import { TurnView } from "./TurnView";
-import { useConversation } from "../../hooks/useConversation";
+import type { useConversation } from "../../hooks/useConversation";
 
 // Example openers, chosen to show the range: different cities, meals, diets, and
 // languages, hinting that the agent replies in whatever language it is asked in.
@@ -28,8 +28,12 @@ const STARTERS = [
   "Gluten-free brunch in Lisbon",
 ];
 
-export function Conversation() {
-  const { turns, isBusy, send, reset } = useConversation();
+interface ConversationProps {
+  conversation: ReturnType<typeof useConversation>;
+}
+
+export function Conversation({ conversation }: ConversationProps) {
+  const { turns, isBusy, send, reset } = conversation;
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Follow the conversation as it grows, the way a chat is expected to behave.

@@ -14,7 +14,7 @@
 
 import { useCallback, useRef, useState } from "react";
 import { streamChat } from "../api/agentClient";
-import type { Observation, Suggestion } from "../types/models";
+import type { GenerationRecord, Observation, Suggestion } from "../types/models";
 
 export type Turn = {
   id: string;
@@ -27,6 +27,10 @@ export type Turn = {
   observationOrder: string[];
   /** Structured recommendation cards, when this turn produced any. */
   suggestions: Suggestion[] | null;
+  /** Model calls made during this turn, with tokens and cost. */
+  generations: GenerationRecord[];
+  /** Estimated total cost of this turn in USD. */
+  costUsd: number;
   /** True while this turn is still streaming. */
   isStreaming: boolean;
   error: string | null;
@@ -40,6 +44,8 @@ function newTurn(role: Turn["role"], text = ""): Turn {
     observations: new Map(),
     observationOrder: [],
     suggestions: null,
+    generations: [],
+    costUsd: 0,
     isStreaming: role === "assistant",
     error: null,
   };
@@ -124,6 +130,14 @@ export function useConversation() {
 
             case "suggestions":
               updateCurrent((turn) => ({ ...turn, suggestions: event.suggestions }));
+              break;
+
+            case "generations":
+              updateCurrent((turn) => ({
+                ...turn,
+                generations: event.generations,
+                costUsd: event.total_cost_usd,
+              }));
               break;
 
             case "error":
