@@ -84,7 +84,10 @@ class OpenAIProvider:
         self,
         api_key: str | None = None,
         model: str | None = None,
-        timeout: float = 30.0,
+        # 45s rather than a shorter default: menu extraction is the heaviest call
+        # this provider makes (large input, a translated multi-item response), and
+        # it was seen timing out at 30s on genuinely large menus.
+        timeout: float = 45.0,
     ) -> None:
         settings = get_settings()
         self._api_key = api_key or settings.openai_api_key
@@ -115,18 +118,36 @@ class OpenAIProvider:
             "response_format": {"type": "json_object"},
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                response = await client.post(
-                    self._CHAT_URL,
-                    headers={
-                        "Authorization": f"Bearer {self._api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-        except httpx.HTTPError as exc:
-            raise LLMError(f"OpenAI request failed: {exc}") from exc
+        # One retry on a transient network failure. Losing an entire restaurant's
+        # menu to a single dropped connection or timeout was worse than the extra
+        # latency of trying again once.
+        last_exc: httpx.HTTPError | None = None
+        response = None
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                    response = await client.post(
+                        self._CHAT_URL,
+                        headers={
+                            "Authorization": f"Bearer {self._api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=payload,
+                    )
+                break
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                if attempt == 0:
+                    continue
+
+        if response is None:
+            # Some httpx exceptions (a bare ReadTimeout, for instance) stringify to
+            # nothing, which made failures here unreadable. The exception's type
+            # is included unconditionally so there is always something to act on.
+            detail = str(last_exc) or "no further detail"
+            raise LLMError(
+                f"OpenAI request failed: {type(last_exc).__name__}: {detail}"
+            ) from last_exc
 
         try:
             data = response.json()

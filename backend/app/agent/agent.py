@@ -16,26 +16,29 @@ from strands import Agent
 from strands.models.openai import OpenAIModel
 
 from app.agent.prompt import SYSTEM_PROMPT
-from app.agent.tools import AGENT_TOOLS
+from app.agent.tools import AGENT_TOOLS, assemble_suggestions
 from app.config import get_settings
-from app.models import SuggestionList
+from app.models import SuggestionList, SuggestionPickList
 from app.providers.llm import LLMError
 
 logger = logging.getLogger(__name__)
 
-# Asks the agent to convert what it already gathered into structured cards. It
-# reuses the conversation context, so no restaurant, menu or review data is
-# fetched again.
+# Asks the agent only for its judgement calls, not for the data it already
+# gathered. An earlier version asked the agent to restate the full recommendation
+# (restaurant details, dishes, prices) from its conversation history, and that
+# restating was unreliable: a restaurant whose menu had just been read correctly,
+# with real prices, was sometimes reported back here as "menu could not be read".
+# Reproducing structured data from context turned out to be a weaker guarantee
+# than looking it up, so this prompt asks only for what a lookup cannot supply.
 _FINALIZE_PROMPT = (
-    "Using only the restaurants, menus and reviews you have already gathered in "
-    "this conversation, produce the structured recommendations. Include every "
-    "restaurant you recommended in your reply. For each one, fill in the review "
-    "insight from the reviews you analysed (both positive and negative points, and "
-    "any context-specific matches), and the dishes you suggested. Include a price "
-    "on a dish only when the menu actually listed one; otherwise leave the price "
-    "fields empty. Populate the website, menu and map links. Do not invent dishes, "
-    "prices or reviews. If you did not gather enough to recommend anything, return "
-    "an empty list."
+    "Which of the restaurants you looked up should be recommended? For each one, "
+    "give its place_id exactly as returned by discover_restaurants, your reasoning "
+    "for recommending it, the names of a few dishes to feature (matching the menu "
+    "you already read, in the traveller's language), and any caveat worth "
+    "mentioning as a short sentence of your own words. Do not include prices, "
+    "ratings or review counts here, and never paste a tool's raw output (JSON, "
+    "citations, links) into a caveat; write your own short remark instead. If you "
+    "did not gather enough to recommend anything, return an empty list."
 )
 
 
@@ -96,10 +99,12 @@ async def extract_suggestions(agent: Agent) -> SuggestionList:
     """
 
     try:
-        return await agent.structured_output_async(SuggestionList, _FINALIZE_PROMPT)
+        picks = await agent.structured_output_async(SuggestionPickList, _FINALIZE_PROMPT)
     except Exception as exc:  # noqa: BLE001 - cards are secondary to the text reply
         # Logged rather than silently swallowed: an empty card list looks identical
         # to "no recommendations were made", which made a real failure here
         # invisible during development.
-        logger.warning("Could not extract structured suggestions: %s", exc)
+        logger.warning("Could not extract suggestion picks: %s", exc)
         return SuggestionList(suggestions=[])
+
+    return assemble_suggestions(picks.picks)

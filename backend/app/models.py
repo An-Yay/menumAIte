@@ -275,6 +275,38 @@ class ReviewInsight(BaseModel):
     reviews_considered: int = 0
 
 
+class SuggestionPick(BaseModel):
+    """The model's judgement on one recommended restaurant.
+
+    Deliberately carries no prices, ratings or review counts: those already exist,
+    correctly, in data the tools returned earlier in the conversation. Asking the
+    model to reproduce them here was the actual bug behind restaurants that had a
+    perfectly good menu ending up shown as "could not be read" — reproducing
+    structured data from context is unreliable even when reading it the first time
+    was not. This model captures only the judgement calls a card cannot make for
+    itself: why this restaurant, which dishes to feature, and any caveat.
+    """
+
+    place_id: str = Field(description="The restaurant's place id.")
+    reasoning: str = Field(description="Why this restaurant fits, in plain language.")
+    recommended_dish_names: list[str] = Field(
+        default_factory=list,
+        description="Names of dishes to feature, matched against the menu already read.",
+    )
+    caveats: list[str] = Field(default_factory=list)
+
+
+class SuggestionPickList(BaseModel):
+    """The model's picks for the final recommendation, before assembly.
+
+    `extract_suggestions` turns this into `SuggestionList` by joining each pick
+    with the restaurant, menu and review data already gathered, rather than
+    trusting the model to restate that data.
+    """
+
+    picks: list[SuggestionPick] = Field(default_factory=list)
+
+
 class SuggestionList(BaseModel):
     """A wrapper holding the final recommendations.
 

@@ -68,6 +68,10 @@ class PlacesProvider(Protocol):
         """Return published reviews for a single restaurant."""
         ...
 
+    async def get_photo_urls(self, place_id: str, limit: int = 1) -> list[str]:
+        """Return URLs of photos published for a restaurant."""
+        ...
+
 
 def build_discovery_query(brief: SearchBrief) -> str:
     """Turn a structured brief into a natural-language search query.
@@ -186,6 +190,36 @@ class GooglePlacesProvider:
         reviews = data.get("reviews", []) or []
         return [self._to_review(review) for review in reviews[:limit]]
 
+    async def get_photo_urls(self, place_id: str, limit: int = 1) -> list[str]:
+        """Return URLs for a restaurant's published photos.
+
+        Diners very often photograph the menu board or a menu page, so these
+        pictures are sometimes the only place a menu exists for a restaurant with
+        no website. `limit` defaults to one because each photo is a billed request
+        and each one read costs a vision model call on top.
+        """
+
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                response = await client.get(
+                    f"{_PLACES_BASE_URL}/places/{place_id}",
+                    headers=self._headers("photos"),
+                )
+        except httpx.HTTPError as exc:
+            raise PlacesError(f"Places photo request failed: {exc}") from exc
+
+        data = self._parse_response(response)
+        photos = data.get("photos", []) or []
+
+        # A photo is referenced by resource name; the bytes come from its `media`
+        # endpoint. Width is capped to keep the download and the vision call small.
+        return [
+            f"{_PLACES_BASE_URL}/{photo['name']}/media"
+            f"?maxWidthPx=1200&key={self._api_key}"
+            for photo in photos[:limit]
+            if photo.get("name")
+        ]
+
     @staticmethod
     def _parse_response(response: httpx.Response) -> dict[str, Any]:
         """Validate an API response and return its decoded body.
@@ -212,6 +246,32 @@ class GooglePlacesProvider:
         return data
 
     @staticmethod
+    def _clean_maps_url(place: dict[str, Any]) -> str | None:
+        """Return a stable map link for a place.
+
+        The `googleMapsUri` Google returns carries a `g_mp` parameter identifying
+        the request that produced it, which is not meaningful to a traveller and
+        made shared links behave unpredictably. It is stripped, leaving the `cid`
+        that identifies the place itself. When no usable link comes back, one is
+        built from the place id instead, which Maps resolves directly.
+        """
+
+        raw = place.get("googleMapsUri")
+        if raw:
+            base, _, query = raw.partition("?")
+            kept = [
+                part
+                for part in query.split("&")
+                if part and not part.startswith("g_mp=")
+            ]
+            return f"{base}?{'&'.join(kept)}" if kept else base
+
+        place_id = place.get("id")
+        if place_id:
+            return f"https://www.google.com/maps/place/?q=place_id:{place_id}"
+        return None
+
+    @staticmethod
     def _to_restaurant(place: dict[str, Any]) -> Restaurant:
         """Map a Places result onto our `Restaurant` model.
 
@@ -229,7 +289,7 @@ class GooglePlacesProvider:
             price_level=place.get("priceLevel"),
             address=place.get("formattedAddress"),
             website_url=place.get("websiteUri"),
-            maps_url=place.get("googleMapsUri"),
+            maps_url=GooglePlacesProvider._clean_maps_url(place),
             primary_type=(place.get("primaryTypeDisplayName") or {}).get("text"),
         )
 

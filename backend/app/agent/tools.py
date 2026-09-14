@@ -17,23 +17,45 @@ from typing import Any
 
 from strands import tool
 
-from app.crawler.menu_crawler import MenuCrawler
-from app.models import Review, SearchBrief
+from app.crawler.menu_crawler import MenuCrawler, MenuCrawlResult
+from app.models import (
+    Menu,
+    MenuItem,
+    Restaurant,
+    Review,
+    ReviewInsight,
+    SearchBrief,
+    Suggestion,
+    SuggestionList,
+    SuggestionPick,
+)
 from app.providers.llm import OpenAIProvider
-from app.providers.places import GooglePlacesProvider
+from app.providers.places import GooglePlacesProvider, PlacesError
 from app.tools.dietary import resolve_dietary_profile as _resolve_dietary_profile
 from app.tools.menu_extract import extract_and_translate_menu as _extract_menu
+from app.tools.menu_ocr import read_menu_from_photo as _read_menu_from_photo
 from app.tools.reviews import analyze_reviews as _analyze_reviews
 from app.tools.web_search import search_menu_online as _search_menu_online
 
-# Reviews fetched during discovery are cached per place id so the reviews can be
-# fetched once and then analysed without paying for a second Places call. Scoped
+# Everything a tool call has already read is cached here, keyed by place id. Scoped
 # to the process, which is sufficient for a locally run session.
-_review_cache: dict[str, list[Review]] = {}
+#
+# These exist so the final recommendation can be assembled from the actual data the
+# tools returned, rather than by asking the model to restate it. Restating turned
+# out to be unreliable: a restaurant whose menu had just been read correctly, with
+# real prices, was later reported by the model as "menu could not be read" when it
+# tried to reproduce that data from its own conversation history. Prices and dish
+# names are looked up here instead; the model is only asked for judgement calls
+# (which restaurant, which dishes to feature, why) that a lookup cannot make.
+# How many listing photos to check when looking for a menu. Kept small: each one
+# is a billed photo request plus a vision model call, and the search stops at the
+# first photo that actually shows a menu, so the usual cost is one.
+_MAX_MENU_PHOTOS = 3
 
-# Menu text is no longer cached between tool calls: `get_menu` crawls and extracts
-# within a single call, so the large raw text never leaves the server or passes
-# through the model's context.
+_restaurant_cache: dict[str, Restaurant] = {}
+_menu_cache: dict[str, Menu] = {}
+_review_cache: dict[str, list[Review]] = {}
+_review_insight_cache: dict[str, ReviewInsight] = {}
 
 
 @tool
@@ -99,6 +121,9 @@ async def discover_restaurants(
     provider = GooglePlacesProvider()
     restaurants = await provider.discover(brief, limit=limit)
 
+    for restaurant in restaurants:
+        _restaurant_cache[restaurant.place_id] = restaurant
+
     return {
         "count": len(restaurants),
         "restaurants": [r.model_dump() for r in restaurants],
@@ -109,9 +134,9 @@ async def discover_restaurants(
 async def get_menu(
     restaurant_name: str,
     city: str,
-    website_url: str,
     restaurant_place_id: str,
     currency: str,
+    website_url: str | None = None,
     output_language: str = "en",
     forbidden_ingredients: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -125,8 +150,9 @@ async def get_menu(
     Args:
         restaurant_name: The restaurant's name, used if a web search is needed.
         city: The city it is in, so a search cannot match a namesake elsewhere.
-        website_url: Its website, from `discover_restaurants`.
         restaurant_place_id: Its place id, from `discover_restaurants`.
+        website_url: Its website, from `discover_restaurants`. Pass None when the
+            restaurant has none; the other sources are still tried.
         currency: ISO 4217 code for the local currency, e.g. "EUR" in Barcelona,
             "AUD" in Sydney, "INR" in Mumbai. Menus often print prices with no
             currency, so this is attached to them.
@@ -145,7 +171,13 @@ async def get_menu(
         and do not name any dishes for that restaurant.
     """
 
-    crawl = await MenuCrawler().crawl(website_url)
+    # A restaurant with no website skips straight to the later sources rather than
+    # being written off; its menu may still exist in a search result or a photo.
+    crawl = (
+        await MenuCrawler().crawl(website_url)
+        if website_url
+        else MenuCrawlResult(website_url="", note="no website is listed")
+    )
 
     menu = None
     source = "the restaurant's website"
@@ -171,31 +203,60 @@ async def get_menu(
         found = search.get("items") or []
         if found:
             source = search.get("source_name") or "a web search"
-            return {
-                "menu_available": True,
-                "menu_url": search.get("menu_url") or crawl.menu_url,
-                "source": source,
-                "source_language": None,
-                "items": [
-                    {
-                        "name": item.get("name"),
-                        "description": item.get("description"),
-                        "price_amount": item.get("price_amount"),
-                        "price_currency": currency if item.get("price_available") else None,
-                        "price_available": bool(item.get("price_available")),
-                        "dietary_tags": [],
-                        "matches_requirements": None,
-                    }
+            web_menu = Menu(
+                restaurant_place_id=restaurant_place_id,
+                menu_url=search.get("menu_url") or crawl.menu_url,
+                items=[
+                    MenuItem(
+                        name=item.get("name") or "",
+                        description=item.get("description"),
+                        price_amount=item.get("price_amount"),
+                        price_currency=currency if item.get("price_available") else None,
+                        price_available=bool(item.get("price_available")),
+                    )
                     for item in found
+                    if item.get("name")
                 ],
-                "note": search.get("note"),
-            }
+            )
+            _menu_cache[restaurant_place_id] = web_menu
+            payload = web_menu.model_dump()
+            payload["menu_available"] = True
+            payload["source"] = source
+            payload["note"] = search.get("note")
+            return payload
 
+        # Last resort: read the menu from a photo on the restaurant's map listing.
+        # Diners often photograph the menu board, and for a restaurant with no
+        # website this can be the only place a menu exists at all. Deliberately
+        # limited to a single photo, since each attempt costs a billed photo
+        # request plus a vision model call.
+        photo_menu = await _menu_from_photo(
+            restaurant_place_id=restaurant_place_id,
+            currency=currency,
+            output_language=output_language,
+        )
+        if photo_menu is not None and photo_menu.items:
+            _menu_cache[restaurant_place_id] = photo_menu
+            payload = photo_menu.model_dump()
+            payload["menu_available"] = True
+            payload["source"] = "a photo of the menu from the restaurant's listing"
+            payload["note"] = (
+                "Transcribed from a customer photo of the menu, so it may be "
+                "incomplete or out of date."
+            )
+            return payload
+
+        no_menu = Menu(
+            restaurant_place_id=restaurant_place_id,
+            menu_url=crawl.menu_url or website_url,
+            retrieval_note=crawl.note or search.get("note") or "No menu could be read.",
+        )
+        _menu_cache[restaurant_place_id] = no_menu
         return {
             "menu_available": False,
-            "menu_url": crawl.menu_url or website_url,
+            "menu_url": no_menu.menu_url,
             "items": [],
-            "note": crawl.note or search.get("note") or "No menu could be read.",
+            "note": no_menu.retrieval_note,
             "instruction": (
                 "No menu was read for this restaurant. Do NOT list any dishes for "
                 "it, and do not turn dishes mentioned in reviews into menu items. "
@@ -204,6 +265,7 @@ async def get_menu(
             ),
         }
 
+    _menu_cache[restaurant_place_id] = menu
     payload = menu.model_dump()
     payload["menu_available"] = True
     payload["source"] = source
@@ -266,7 +328,151 @@ async def analyse_restaurant_reviews(
         output_language=output_language,
         llm=OpenAIProvider(),
     )
+    _review_insight_cache[place_id] = insight
     return insight.model_dump()
+
+
+async def _menu_from_photo(
+    *, restaurant_place_id: str, currency: str, output_language: str
+) -> Menu | None:
+    """Try to read a menu from one photo on the restaurant's map listing.
+
+    Returns None when no photo is available or none of it could be read, so the
+    caller falls through to reporting that no menu was found.
+    """
+
+    try:
+        photo_urls = await GooglePlacesProvider().get_photo_urls(
+            restaurant_place_id, limit=_MAX_MENU_PHOTOS
+        )
+    except PlacesError:
+        return None
+
+    # Photos come back in the provider's own order, which is rarely menu-first, so
+    # the first one is often the dining room or a plate of food. Each is tried in
+    # turn and the loop stops at the first that is actually a menu, which keeps the
+    # usual cost at a single call while giving a realistic chance of finding one.
+    found: list[dict[str, Any]] = []
+    for photo_url in photo_urls:
+        result = await _read_menu_from_photo(
+            photo_url=photo_url, output_language=output_language
+        )
+        found = result.get("items") or []
+        if found:
+            break
+
+    if not found:
+        return None
+
+    return Menu(
+        restaurant_place_id=restaurant_place_id,
+        items=[
+            MenuItem(
+                name=item.get("name") or "",
+                description=item.get("description"),
+                price_amount=item.get("price_amount"),
+                price_currency=currency if item.get("price_available") else None,
+                price_available=bool(item.get("price_available")),
+            )
+            for item in found
+            if item.get("name")
+        ],
+        retrieval_note=(
+            "Read from a customer photo of the menu; it may be incomplete."
+        ),
+    )
+
+
+def _clean_caveat(text: str) -> str | None:
+    """Reduce a model-written caveat to a short, safe remark, or drop it.
+
+    The model has repeatedly pasted raw tool output (a JSON object, a markdown
+    citation link, or both concatenated) into a caveat instead of summarising it.
+    Rather than trying to recognise every shape that bad output can take, this
+    truncates at the first character that signals pasted data (an opening brace or
+    bracket, or a markdown link) and keeps only the prose before it. A caveat with
+    nothing usable before that point is dropped; a short prefix that happens to
+    precede junk is still worth keeping.
+    """
+
+    stripped = text.strip()
+    if not stripped:
+        return None
+
+    cut = len(stripped)
+    for marker in ("{", "[", "](", "## ["):
+        index = stripped.find(marker)
+        if index != -1:
+            cut = min(cut, index)
+
+    cleaned = stripped[:cut].strip().rstrip("#*_-— ")
+    if not cleaned or len(cleaned) < 8 or len(cleaned) > 300:
+        return None
+    return cleaned
+
+
+def assemble_suggestion(pick: SuggestionPick) -> Suggestion | None:
+    """Build one `Suggestion` from a model's pick and the data already gathered.
+
+    Returns None when the restaurant itself was never looked up (an invalid
+    place_id from the model), which the caller drops rather than showing an empty
+    card.
+    """
+
+    restaurant = _restaurant_cache.get(pick.place_id)
+    if restaurant is None:
+        return None
+
+    menu = _menu_cache.get(pick.place_id)
+    all_items = menu.items if menu else []
+
+    # Match the model's chosen dish names against the actual menu, case-insensitively
+    # and allowing a partial match, so small rewordings ("Dosa" vs "Plain Dosa")
+    # still resolve to the right item.
+    recommended: list[MenuItem] = []
+    for wanted in pick.recommended_dish_names:
+        wanted_lower = wanted.lower()
+        match = next(
+            (
+                item
+                for item in all_items
+                if item.name.lower() == wanted_lower or wanted_lower in item.name.lower()
+            ),
+            None,
+        )
+        if match:
+            recommended.append(match)
+
+    # If nothing named by the model matched, but real dishes exist, still show a
+    # few: an empty card for a restaurant with a perfectly good menu is worse than
+    # showing dishes the model did not explicitly name.
+    if not recommended and all_items:
+        recommended = all_items[:4]
+
+    # The model's caveats are meant to be a short prose remark, but it has been
+    # observed pasting a raw tool result (a JSON blob, or a citation link plus one)
+    # in here instead of summarising it. Such text is filtered out rather than
+    # shown to the traveller; the real caveat (the menu's own retrieval note) is
+    # already added from data, not from the model's retelling of it.
+    caveats = [c for raw in pick.caveats if (c := _clean_caveat(raw)) is not None]
+    if menu and menu.retrieval_note and menu.retrieval_note not in caveats:
+        caveats.append(menu.retrieval_note)
+
+    return Suggestion(
+        restaurant=restaurant,
+        reasoning=pick.reasoning,
+        recommended_items=recommended,
+        review_insight=_review_insight_cache.get(pick.place_id),
+        menu_url=menu.menu_url if menu else None,
+        caveats=caveats,
+    )
+
+
+def assemble_suggestions(picks: list[SuggestionPick]) -> SuggestionList:
+    """Build the full `SuggestionList` from the model's picks."""
+
+    suggestions = [s for pick in picks if (s := assemble_suggestion(pick)) is not None]
+    return SuggestionList(suggestions=suggestions)
 
 
 # The toolset handed to the agent.
