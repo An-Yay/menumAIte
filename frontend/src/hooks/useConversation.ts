@@ -50,6 +50,15 @@ export function useConversation() {
   const [isBusy, setIsBusy] = useState(false);
   const sessionIdRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Guards against sending the same message twice.
+  //
+  // `isBusy` cannot do this job: it is state, so it is captured by the callback's
+  // closure and only updates on the next render. Two calls in quick succession —
+  // a double click, or React's development double-invocation — therefore both saw
+  // `isBusy === false` and both started a request, which produced two identical
+  // replies and made the agent appear to answer before being asked. A ref updates
+  // synchronously, so the second call sees the first immediately.
+  const inFlightRef = useRef(false);
 
   /** Apply a change to the assistant turn currently streaming (the last one). */
   const updateCurrent = useCallback((change: (turn: Turn) => Turn) => {
@@ -64,7 +73,8 @@ export function useConversation() {
   const send = useCallback(
     async (message: string) => {
       const trimmed = message.trim();
-      if (!trimmed || isBusy) return;
+      if (!trimmed || inFlightRef.current) return;
+      inFlightRef.current = true;
 
       abortRef.current?.abort();
       const controller = new AbortController();
@@ -130,18 +140,22 @@ export function useConversation() {
           }));
         }
       } finally {
+        // Always released, even when aborted, or the guard would latch on and
+        // block every later message.
+        inFlightRef.current = false;
         if (!controller.signal.aborted) {
           updateCurrent((turn) => ({ ...turn, isStreaming: false }));
           setIsBusy(false);
         }
       }
     },
-    [isBusy, updateCurrent],
+    [updateCurrent],
   );
 
   /** Abandon this conversation and start a new one. */
   const reset = useCallback(() => {
     abortRef.current?.abort();
+    inFlightRef.current = false;
     sessionIdRef.current = null;
     setTurns([]);
     setIsBusy(false);
