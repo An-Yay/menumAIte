@@ -22,7 +22,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from strands import Agent
 
-from app.agent.agent import build_agent
+from app.agent.agent import build_agent, extract_suggestions
 from app.api.events import EventTranslator
 from app.models import COMMON_MEALS
 
@@ -82,6 +82,20 @@ async def _stream(message: str, session_id: str) -> AsyncIterator[str]:
         async for event in agent.stream_async(message):
             for translated in translator.translate(event):
                 yield _sse(translated)
+
+        # After the reply, derive structured recommendations from the same
+        # conversation so the interface can render restaurant cards. This is
+        # skipped for turns that did not produce recommendations (for example a
+        # clarifying question), where there is nothing to structure.
+        suggestions = await extract_suggestions(agent)
+        if suggestions.suggestions:
+            yield _sse(
+                {
+                    "type": "suggestions",
+                    "suggestions": [s.model_dump(mode="json") for s in suggestions.suggestions],
+                }
+            )
+
         yield _sse(translator.finish())
     except Exception as exc:  # noqa: BLE001
         # The stream has already begun, so a failure cannot be reported as an HTTP

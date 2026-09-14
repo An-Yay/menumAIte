@@ -275,6 +275,17 @@ class ReviewInsight(BaseModel):
     reviews_considered: int = 0
 
 
+class SuggestionList(BaseModel):
+    """A wrapper holding the final recommendations.
+
+    Structured output needs a single root model, and a bare list is not one, so
+    the suggestions are wrapped. This is the shape the interface renders as
+    restaurant cards.
+    """
+
+    suggestions: list["Suggestion"] = Field(default_factory=list)
+
+
 class Suggestion(BaseModel):
     """A final recommendation for one restaurant."""
 

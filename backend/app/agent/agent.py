@@ -16,7 +16,23 @@ from strands.models.openai import OpenAIModel
 from app.agent.prompt import SYSTEM_PROMPT
 from app.agent.tools import AGENT_TOOLS
 from app.config import get_settings
+from app.models import SuggestionList
 from app.providers.llm import LLMError
+
+# Asks the agent to convert what it already gathered into structured cards. It
+# reuses the conversation context, so no restaurant, menu or review data is
+# fetched again.
+_FINALIZE_PROMPT = (
+    "Using only the restaurants, menus and reviews you have already gathered in "
+    "this conversation, produce the structured recommendations. Include every "
+    "restaurant you recommended in your reply. For each one, fill in the review "
+    "insight from the reviews you analysed (both positive and negative points, and "
+    "any context-specific matches), and the dishes you suggested. Include a price "
+    "on a dish only when the menu actually listed one; otherwise leave the price "
+    "fields empty. Populate the website, menu and map links. Do not invent dishes, "
+    "prices or reviews. If you did not gather enough to recommend anything, return "
+    "an empty list."
+)
 
 
 def build_model() -> OpenAIModel:
@@ -61,3 +77,21 @@ def build_agent() -> Agent:
             "occasion and dietary needs, and shows its working."
         ),
     )
+
+
+async def extract_suggestions(agent: Agent) -> SuggestionList:
+    """Pull structured recommendations out of a completed conversation.
+
+    Run after the agent has answered, so the interface can render restaurant cards
+    (ratings, priced dishes, review balance, links) alongside the chat reply. It
+    draws on the agent's existing context rather than fetching anything again, so
+    it is one cheap model call.
+
+    Any failure returns an empty list: the chat reply has already been shown, so a
+    missing card view should degrade quietly rather than surface an error.
+    """
+
+    try:
+        return await agent.structured_output_async(SuggestionList, _FINALIZE_PROMPT)
+    except Exception:  # noqa: BLE001 - cards are a nice-to-have over the text reply
+        return SuggestionList(suggestions=[])
