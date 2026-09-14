@@ -175,5 +175,8 @@ export function useConversation() {
     setIsBusy(false);
   }, []);
 
-  return { turns, isBusy, send, reset, sessionId: sessionIdRef.current };
+  // The session id is deliberately not returned: it lives in a ref because it is
+  // not rendered, and reading a ref during render is unsafe. Nothing outside this
+  // hook needs it, since `send` attaches it to each request itself.
+  return { turns, isBusy, send, reset };
 }

@@ -90,7 +90,7 @@ def build_agent() -> Agent:
 
 
 async def extract_suggestions(
-    agent: Agent, *, review_context: str = "", output_language: str = "en"
+    agent: Agent, *, review_context: str = ""
 ) -> SuggestionList:
     """Pull structured recommendations out of a completed conversation.
 
@@ -117,6 +117,4 @@ async def extract_suggestions(
         logger.warning("Could not extract suggestion picks: %s", exc)
         return SuggestionList(suggestions=[])
 
-    return await assemble_suggestions(
-        picks.picks, review_context=review_context, output_language=output_language
-    )
+    return await assemble_suggestions(picks.picks, review_context=review_context)

@@ -185,7 +185,9 @@ class StubLLMProvider:
     network access.
     """
 
-    async def complete_json(
+    async def complete_json(  # noqa: ARG002 - must match the protocol signature
         self, *, system: str, prompt: str, schema_hint: str, label: str = "generation"
     ) -> dict[str, Any]:
+        # Arguments are intentionally ignored: this stub exists to satisfy
+        # `LLMProvider` without calling a model.
         return {}

@@ -42,10 +42,13 @@ async def analyze_reviews(
     reviews: list[Review],
     restaurant_place_id: str,
     context: str,
-    output_language: str,
     llm: LLMProvider,
 ) -> ReviewInsight:
     """Produce a `ReviewInsight` from a restaurant's reviews.
+
+    The output language is taken from `context` (the traveller's own words) rather
+    than a separate language argument: the app does not reliably know a language
+    code, and the traveller's message is the definitive signal.
 
     Always returns an insight. When there are no reviews, or analysis fails, the
     insight is empty rather than fabricated, and `reviews_considered` reflects

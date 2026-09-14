@@ -300,20 +300,17 @@ async def get_restaurant_reviews(place_id: str, limit: int = 5) -> dict[str, Any
 
 
 @tool
-async def analyse_restaurant_reviews(
-    place_id: str,
-    context: str,
-    output_language: str = "en",
-) -> dict[str, Any]:
+async def analyse_restaurant_reviews(place_id: str, context: str) -> dict[str, Any]:
     """Summarise a restaurant's reviews, good and bad, for this traveller.
 
     Uses the reviews fetched by `get_restaurant_reviews`, so call that first.
 
     Args:
         place_id: The restaurant's place id.
-        context: The traveller's situation, e.g. "vegetarian dinner, gluten-free",
-            used to find reviews that speak to it directly.
-        output_language: Language to write the findings in.
+        context: The traveller's own words about what they are looking for, e.g.
+            "vegetarian dinner, gluten-free". Used both to find reviews that speak
+            to their situation and to decide which language to write the findings
+            in, so pass their phrasing rather than a translation of it.
 
     Returns:
         Recurring praise, recurring complaints, and review excerpts relevant to the
@@ -325,7 +322,6 @@ async def analyse_restaurant_reviews(
         reviews=reviews,
         restaurant_place_id=place_id,
         context=context,
-        output_language=output_language,
         llm=OpenAIProvider(),
     )
     _review_insight_cache[place_id] = insight
@@ -412,7 +408,7 @@ def _clean_caveat(text: str) -> str | None:
 
 
 async def assemble_suggestion(
-    pick: SuggestionPick, *, review_context: str = "", output_language: str = "en"
+    pick: SuggestionPick, *, review_context: str = ""
 ) -> Suggestion | None:
     """Build one `Suggestion` from a model's pick and the data already gathered.
 
@@ -468,9 +464,7 @@ async def assemble_suggestion(
     insight = _review_insight_cache.get(pick.place_id)
     if insight is None:
         insight = await _ensure_review_insight(
-            place_id=pick.place_id,
-            context=review_context,
-            output_language=output_language,
+            place_id=pick.place_id, context=review_context
         )
 
     return Suggestion(
@@ -484,7 +478,7 @@ async def assemble_suggestion(
 
 
 async def _ensure_review_insight(
-    *, place_id: str, context: str, output_language: str
+    *, place_id: str, context: str
 ) -> ReviewInsight | None:
     """Fetch and analyse a restaurant's reviews if not already done this session.
 
@@ -503,32 +497,26 @@ async def _ensure_review_insight(
             reviews=reviews,
             restaurant_place_id=place_id,
             context=context,
-            output_language=output_language,
             llm=OpenAIProvider(),
         )
         _review_insight_cache[place_id] = insight
         return insight
-    except (PlacesError, Exception):  # noqa: BLE001 - reviews are best-effort
+    except Exception:  # noqa: BLE001 - reviews are best-effort, never fatal
         return None
 
 
 async def assemble_suggestions(
-    picks: list[SuggestionPick],
-    *,
-    review_context: str = "",
-    output_language: str = "en",
+    picks: list[SuggestionPick], *, review_context: str = ""
 ) -> SuggestionList:
     """Build the full `SuggestionList` from the model's picks.
 
-    `review_context` and `output_language` are used only when a card is missing its
-    review summary and the reviews have to be fetched here as a fallback.
+    `review_context` is used only when a card is missing its review summary and the
+    reviews have to be fetched here as a fallback.
     """
 
     suggestions: list[Suggestion] = []
     for pick in picks:
-        built = await assemble_suggestion(
-            pick, review_context=review_context, output_language=output_language
-        )
+        built = await assemble_suggestion(pick, review_context=review_context)
         if built is not None:
             suggestions.append(built)
     return SuggestionList(suggestions=suggestions)

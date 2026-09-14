@@ -160,6 +160,34 @@ _SPAM_WORDS = (
 )
 
 
+def normalise_url(url: str) -> str:
+    """Return a fetchable absolute URL for an address of uncertain shape.
+
+    Providers and search results hand back addresses inconsistently: a bare host
+    ("restaurant.com"), a host with a path but no scheme ("restaurant.com/menu"),
+    or a protocol-relative link ("//restaurant.com"). None of those can be fetched
+    directly, and previously they failed as unreadable even though the site was
+    perfectly reachable.
+
+    HTTPS is assumed when no scheme is given, since it is now the norm and the
+    crawler already falls back to other candidates if it does not resolve.
+    """
+
+    cleaned = url.strip()
+    if not cleaned:
+        return cleaned
+
+    # Protocol-relative: "//example.com/menu".
+    if cleaned.startswith("//"):
+        return f"https:{cleaned}"
+
+    # Already has a scheme (http, https, or anything else we should leave alone).
+    if "://" in cleaned:
+        return cleaned
+
+    return f"https://{cleaned}"
+
+
 def _pdf_text(content: bytes, max_pages: int = _MAX_PDF_PAGES) -> str:
     """Extract text from a menu PDF.
 
@@ -507,8 +535,12 @@ class MenuCrawler:
 
         Fetches the homepage, ranks its links, then fetches the best candidates
         concurrently and keeps whichever page looks most like a real menu.
+
+        The address is normalised first, so a bare host such as
+        "restaurant.com/menu" is read rather than rejected for having no scheme.
         """
 
+        website_url = normalise_url(website_url)
         result = MenuCrawlResult(website_url=website_url)
 
         # `follow_redirects` matters because restaurant sites move between www,
