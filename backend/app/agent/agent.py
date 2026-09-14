@@ -10,6 +10,8 @@ handled naturally, rather than having to restart a fixed pipeline.
 
 from __future__ import annotations
 
+import logging
+
 from strands import Agent
 from strands.models.openai import OpenAIModel
 
@@ -18,6 +20,8 @@ from app.agent.tools import AGENT_TOOLS
 from app.config import get_settings
 from app.models import SuggestionList
 from app.providers.llm import LLMError
+
+logger = logging.getLogger(__name__)
 
 # Asks the agent to convert what it already gathered into structured cards. It
 # reuses the conversation context, so no restaurant, menu or review data is
@@ -93,5 +97,9 @@ async def extract_suggestions(agent: Agent) -> SuggestionList:
 
     try:
         return await agent.structured_output_async(SuggestionList, _FINALIZE_PROMPT)
-    except Exception:  # noqa: BLE001 - cards are a nice-to-have over the text reply
+    except Exception as exc:  # noqa: BLE001 - cards are secondary to the text reply
+        # Logged rather than silently swallowed: an empty card list looks identical
+        # to "no recommendations were made", which made a real failure here
+        # invisible during development.
+        logger.warning("Could not extract structured suggestions: %s", exc)
         return SuggestionList(suggestions=[])

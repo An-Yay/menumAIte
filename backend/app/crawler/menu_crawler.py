@@ -401,16 +401,55 @@ class MenuCrawler:
 
     def __init__(self, timeout: float = _TIMEOUT_SECONDS) -> None:
         self._timeout = timeout
+        # Created lazily: most crawls never hit a certificate error, so most
+        # crawls never need this client.
+        self._insecure_client_instance: httpx.AsyncClient | None = None
+
+    @property
+    def _insecure_client(self) -> httpx.AsyncClient:
+        """A client that skips certificate verification, used only as a fallback.
+
+        See `_fetch` for why this exists and the boundaries on when it is used.
+        """
+
+        if self._insecure_client_instance is None:
+            self._insecure_client_instance = httpx.AsyncClient(
+                timeout=self._timeout,
+                follow_redirects=True,
+                verify=False,
+                headers={"User-Agent": _USER_AGENT, "Accept-Language": "en,*;q=0.5"},
+            )
+        return self._insecure_client_instance
 
     async def _fetch(self, client: httpx.AsyncClient, url: str) -> MenuPage:
         """Fetch one URL and turn it into a `MenuPage`.
 
         Failures are captured as notes rather than raised: one unreachable page
         should never abort the wider recommendation.
+
+        A certificate error gets one retry with verification disabled. Restaurant
+        and menu-aggregator sites are frequently small operations with an expired
+        or misconfigured certificate on an otherwise legitimate, public page; a
+        strict client simply cannot read them, which was losing real menus (with
+        real prices) that a browser reaches without issue. This is a deliberate,
+        narrow trade-off: it applies only to this read-only fetch of public menu
+        pages, only as a fallback after the verified attempt fails specifically on
+        the certificate, and no credentials or other secrets are ever sent over
+        these connections.
         """
 
         try:
             response = await client.get(url)
+        except httpx.ConnectError as exc:
+            if "certificate" not in str(exc).lower():
+                return MenuPage(url=url, note=f"could not be fetched ({type(exc).__name__})")
+            try:
+                response = await self._insecure_client.get(url)
+            except httpx.HTTPError as retry_exc:
+                return MenuPage(
+                    url=url,
+                    note=f"could not be fetched even without certificate checks ({type(retry_exc).__name__})",
+                )
         except httpx.HTTPError as exc:
             return MenuPage(url=url, note=f"could not be fetched ({type(exc).__name__})")
 
@@ -509,6 +548,12 @@ class MenuCrawler:
                 )
                 candidates.extend(fetched)
                 result.pages_visited.extend(links)
+
+        # Close the certificate-skipping fallback client if `_fetch` created one
+        # for this crawl, so it is not left open past the call that needed it.
+        if self._insecure_client_instance is not None:
+            await self._insecure_client_instance.aclose()
+            self._insecure_client_instance = None
 
         best = self._pick_best(candidates)
 
