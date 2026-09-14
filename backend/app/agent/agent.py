@@ -34,11 +34,14 @@ _FINALIZE_PROMPT = (
     "Which of the restaurants you looked up should be recommended? For each one, "
     "give its place_id exactly as returned by discover_restaurants, your reasoning "
     "for recommending it, the names of a few dishes to feature (matching the menu "
-    "you already read, in the traveller's language), and any caveat worth "
-    "mentioning as a short sentence of your own words. Do not include prices, "
-    "ratings or review counts here, and never paste a tool's raw output (JSON, "
-    "citations, links) into a caveat; write your own short remark instead. If you "
-    "did not gather enough to recommend anything, return an empty list."
+    "you already read), and any caveat worth mentioning as a short sentence of "
+    "your own words. Do not include prices, ratings or review counts here, and "
+    "never paste a tool's raw output (JSON, citations, links) into a caveat; write "
+    "your own short remark instead. If you did not gather enough to recommend "
+    "anything, return an empty list.\n\n"
+    "IMPORTANT: write the reasoning, dish names and caveats in {language}, the same "
+    "language you have used with the traveller. This is card text shown to them, so "
+    "it must be in their language, not English (unless their language is English)."
 )
 
 
@@ -100,8 +103,13 @@ async def extract_suggestions(
     missing card view should degrade quietly rather than surface an error.
     """
 
+    # The finalize call runs on the same agent, with the whole conversation in its
+    # history, so it can be told to reuse "the same language you have used" rather
+    # than being handed a language code (which the app does not reliably track).
+    prompt = _FINALIZE_PROMPT.format(language="the same language you have used with the traveller")
+
     try:
-        picks = await agent.structured_output_async(SuggestionPickList, _FINALIZE_PROMPT)
+        picks = await agent.structured_output_async(SuggestionPickList, prompt)
     except Exception as exc:  # noqa: BLE001 - cards are secondary to the text reply
         # Logged rather than silently swallowed: an empty card list looks identical
         # to "no recommendations were made", which made a real failure here
