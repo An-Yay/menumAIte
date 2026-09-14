@@ -20,6 +20,7 @@ restaurants, prices or reviews.
 - [Running locally](#running-locally)
 - [Project layout](#project-layout)
 - [Technical decisions](#technical-decisions)
+- [Assumptions](#assumptions)
 - [Known limitations](#known-limitations)
 - [Open items](#open-items)
 
@@ -270,7 +271,52 @@ development branches for the two halves.
 - **SSE, in-memory sessions.** Chosen for a local, single-user demo; both are
   called out under limitations for a production path.
 
+## Assumptions
+
+The solution was built on the following assumptions, stated so they can be
+challenged:
+
+- **Google Places is an acceptable source of truth** for restaurant existence,
+  ratings, review counts and photos. Cards present its data as-is.
+- **A restaurant's own website is the best menu source.** Where it publishes a
+  menu (HTML or PDF), that is preferred over aggregators, whose prices may be
+  delivery-inflated or stale.
+- **A published price is a real price.** If a number appears against a dish on a
+  menu, it is treated as that dish's price; menus that omit prices are common and
+  handled explicitly rather than assumed.
+- **The traveller's language is the language they type in.** No separate language
+  selector; it is inferred per message.
+- **Local currency follows the city.** Menus frequently omit the currency, so the
+  currency of the searched city is attached to bare prices.
+- **A single user, run locally.** No authentication, no concurrency concerns
+  beyond per-request isolation, and no persistence between restarts.
+- **The traveller can read reviews as a sample.** The five reviews Google returns
+  are taken as representative enough to summarise, with the count shown.
+- **English is a safe default** when a language cannot be determined.
+- **Menu freshness is best-effort.** Live pages are read at request time, but no
+  attempt is made to detect a menu that is outdated on the source itself.
+
 ## Known limitations
+
+### The agent
+
+- **It is autonomous, so its path varies.** The model chooses which tools to call.
+  It may answer a narrow question narrowly, or occasionally skip a step. Review
+  summaries are backfilled in code so a card always has them, but other steps are
+  not guaranteed in a single turn; a follow-up ("read their menus") recovers them.
+- **Recommendation quality depends on discovery.** A text search for "pure
+  vegetarian" can still return a mixed venue with vegetarian options; the agent
+  does not yet hard-distinguish a fully vegetarian venue from a mixed one.
+- **No long-term memory.** Each conversation is independent and lost on restart.
+- **Latency scales with the number of restaurants.** Reading several menus and
+  analysing several review sets sequentially can take tens of seconds.
+- **Structured output is occasionally lossy.** The final pick step can omit a
+  restaurant the reply mentioned; the reply and the cards can therefore differ
+  slightly on a given turn.
+- **Cost figures are estimates.** OpenAI does not return prices, so the trace
+  panel applies hard-coded published rates.
+
+### Data
 
 - **Reviews are a sample.** Google Places returns about five reviews per
   restaurant, selected by Google, out of a total that may run to thousands.
