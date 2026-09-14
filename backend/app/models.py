@@ -200,6 +200,53 @@ class Menu(BaseModel):
     )
 
 
+class DietaryProfile(BaseModel):
+    """A reasoned interpretation of a traveller's dietary needs.
+
+    Produced by the model from the traveller's own words ("I'm Jain", "I'm
+    Muslim", "no nuts"). The reasoning lives in the model rather than a hard-coded
+    ingredient table, so unusual or combined requirements are handled naturally.
+
+    Correctness here can be safety-relevant (allergies) or belief-relevant
+    (religious diets), so the profile deliberately carries clarifying questions
+    and a verification note instead of overclaiming certainty.
+    """
+
+    labels: list[str] = Field(
+        default_factory=list,
+        description="Normalised diet labels, e.g. ['jain'] or ['halal'].",
+    )
+    forbidden_ingredients: list[str] = Field(
+        default_factory=list,
+        description="Ingredients to exclude, e.g. ['onion', 'garlic', 'gelatin'].",
+    )
+    allowed_notes: list[str] = Field(
+        default_factory=list,
+        description="Helpful allowances or clarifications about the diet.",
+    )
+    clarifying_questions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Genuine ambiguities to resolve before searching, e.g. whether eggs "
+            "are acceptable for a vegetarian traveller."
+        ),
+    )
+    search_terms: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Extra terms to widen discovery when a diet has no map category, e.g. "
+            "['pure vegetarian', 'satvik', 'Gujarati'] for Jain."
+        ),
+    )
+    verification_note: str | None = Field(
+        default=None,
+        description=(
+            "Honest caveat about what cannot be guaranteed, e.g. that halal or "
+            "kosher certification must be confirmed with the restaurant."
+        ),
+    )
+
+
 class ReviewInsight(BaseModel):
     """The outcome of reading a restaurant's reviews.
 
