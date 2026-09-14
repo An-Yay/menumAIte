@@ -52,6 +52,21 @@ _SCHEMA_HINT = """\
 }"""
 
 
+def _sanitize_item(item: dict) -> dict:
+    """Normalise one model-produced menu item before validation.
+
+    Models sometimes return an explicit ``null`` for a list field instead of
+    omitting it, which bypasses Pydantic's `default_factory` (that only applies
+    when a key is missing). Coercing such values here keeps the domain model's
+    field definitions simple and avoids repeating this null-handling in every
+    caller.
+    """
+
+    if item.get("dietary_tags") is None:
+        item["dietary_tags"] = []
+    return item
+
+
 async def extract_and_translate_menu(
     *,
     raw_text: str,
@@ -106,7 +121,9 @@ async def extract_and_translate_menu(
             retrieval_note="No individual dishes could be read from the menu.",
         )
 
-    items = [MenuItem.model_validate(item) for item in raw_items[:max_items]]
+    items = [
+        MenuItem.model_validate(_sanitize_item(item)) for item in raw_items[:max_items]
+    ]
 
     source_language = data.get("source_language")
     was_translated = bool(

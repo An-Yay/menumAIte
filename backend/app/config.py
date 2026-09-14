@@ -19,13 +19,15 @@ class Settings(BaseSettings):
     """
 
     # --- Google Cloud ---
-    # Single Google key with "Places API (New)" enabled (restaurant discovery +
-    # reviews) and, later, "Generative Language API" enabled (the LLM).
+    # Google key with "Places API (New)" enabled: restaurant discovery + reviews.
     google_api_key: str | None = None
 
-    # --- Model selection (used once the Strands agent is assembled) ---
-    # Kept optional for now; the agent step will require a real value.
-    llm_model_id: str = "gemini/gemini-1.5-flash"
+    # --- Model provider ---
+    # OpenAI key used by the LLM-backed tools (dietary reasoning, menu
+    # extraction/translation, review analysis) and by the Strands agent itself.
+    # Kept optional so the app, and the non-LLM tools, can boot without it.
+    openai_api_key: str | None = None
+    llm_model_id: str = "gpt-4o-mini"
 
     # Pydantic-settings configuration: read from a local `.env` if present,
     # ignore unknown env vars, and treat variable names case-insensitively.

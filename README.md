@@ -27,7 +27,7 @@ how each recommendation was reached.
 
 - **Discovery & reviews:** Google Places API (New)
 - **Menus:** live crawl of each restaurant's website + LLM extraction/translation
-- **Reasoning, translation, review analysis:** LLM (provider to be finalised)
+- **Reasoning, translation, review analysis:** OpenAI (via the `LLMProvider` abstraction)
 
 ## Status
 

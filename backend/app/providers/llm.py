@@ -16,6 +16,10 @@ from __future__ import annotations
 import json
 from typing import Any, Protocol
 
+import httpx
+
+from app.config import get_settings
+
 
 class LLMError(RuntimeError):
     """Raised when the model cannot return a usable response."""
@@ -64,6 +68,79 @@ def extract_json(raw: str) -> dict[str, Any]:
         return json.loads(text[start : end + 1])
     except json.JSONDecodeError as exc:
         raise LLMError(f"Model output was not valid JSON: {exc}") from exc
+
+
+class OpenAIProvider:
+    """`LLMProvider` backed by the OpenAI Chat Completions API.
+
+    Uses `response_format={"type": "json_object"}`, which instructs the model to
+    return a single JSON object and is the most reliable structured-output mode
+    for this API, rather than relying on prompt wording alone.
+    """
+
+    _CHAT_URL = "https://api.openai.com/v1/chat/completions"
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        timeout: float = 30.0,
+    ) -> None:
+        settings = get_settings()
+        self._api_key = api_key or settings.openai_api_key
+        if not self._api_key:
+            raise LLMError(
+                "OPENAI_API_KEY is not configured. Set it in the environment or "
+                "in a local .env file."
+            )
+        self._model = model or settings.llm_model_id
+        self._timeout = timeout
+
+    async def complete_json(
+        self, *, system: str, prompt: str, schema_hint: str
+    ) -> dict[str, Any]:
+        # The schema hint is folded into the user prompt: JSON mode guarantees
+        # valid JSON syntax but not a specific shape, so the expected shape still
+        # has to be spelled out for the model.
+        full_prompt = (
+            f"{prompt}\n\nRespond with JSON matching this shape:\n{schema_hint}"
+        )
+
+        payload = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": full_prompt},
+            ],
+            "response_format": {"type": "json_object"},
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                response = await client.post(
+                    self._CHAT_URL,
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+        except httpx.HTTPError as exc:
+            raise LLMError(f"OpenAI request failed: {exc}") from exc
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise LLMError(
+                f"OpenAI returned a non-JSON response (HTTP {response.status_code})."
+            ) from exc
+
+        if response.status_code != httpx.codes.OK or "error" in data:
+            message = data.get("error", {}).get("message", response.text)
+            raise LLMError(f"OpenAI error (HTTP {response.status_code}): {message}")
+
+        content = data["choices"][0]["message"]["content"]
+        return extract_json(content)
 
 
 class StubLLMProvider:
