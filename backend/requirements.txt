@@ -14,4 +14,5 @@ httpx>=0.27,<1.0
 selectolax>=0.3.21
 
 # Strands Agents SDK: the agent framework that orchestrates the tools.
-strands-agents>=1.55,<2.0
+# The `openai` extra pulls in the SDK's native OpenAI model support.
+strands-agents[openai]>=1.55,<2.0
