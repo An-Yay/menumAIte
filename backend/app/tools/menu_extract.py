@@ -29,8 +29,20 @@ Rules:
 - Translate each dish name and description into the requested output language,
   and also keep the original name.
 - Tag dishes with dietary properties you can infer (e.g. "vegan", "contains
-  nuts") and, given the traveller's forbidden ingredients, set matches_requirements
-  to true/false, or null when genuinely unclear.
+  nuts"). Only tag "vegan" or "vegetarian" when the dish genuinely is; never tag a
+  meat, poultry, fish or seafood dish as vegetarian or vegan.
+- Set matches_requirements per dish, but judge it correctly:
+  - A forbidden ingredient means the dish must not CONTAIN that ingredient. A dish
+    that simply lacks it still matches.
+  - For halal/kosher, the constraint is about specific excluded items (e.g. pork,
+    alcohol) and preparation, NOT about avoiding meat. Beef, lamb, chicken and
+    fish are all allowed for a halal or kosher diner. Do NOT mark a meat dish as
+    non-matching just because it contains meat. Whether the meat is halal/kosher
+    cannot be told from a menu, so use null (unclear) for a permitted meat dish
+    rather than false.
+  - Use false only when a dish clearly contains a forbidden ingredient (e.g. a
+    pork dish for a halal diner, or nuts for a nut allergy).
+  - Use null when genuinely unclear.
 - Detect the source language of the menu.
 Reply with a single JSON object and nothing else."""
 
