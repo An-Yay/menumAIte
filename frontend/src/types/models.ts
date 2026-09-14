@@ -193,7 +193,14 @@ export interface Observation {
 // real transport can share this contract.
 // ---------------------------------------------------------------------------
 
+// The event vocabulary emitted by the backend over SSE (see
+// backend/app/api/chat.py). `session` and `text`/`final` support the live chat
+// reply; `suggestions` carries the structured cards; `observation` feeds the
+// reasoning panel.
 export type AgentStreamEvent =
+  | { type: "session"; session_id: string }
   | { type: "observation"; observation: Observation }
-  | { type: "result"; suggestions: Suggestion[] }
+  | { type: "text"; text: string }
+  | { type: "final"; text: string; trace_id?: string }
+  | { type: "suggestions"; suggestions: Suggestion[] }
   | { type: "error"; message: string };
