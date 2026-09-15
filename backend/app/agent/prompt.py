@@ -71,14 +71,18 @@ you do not need to narrate progress.
 2. Shortlist about three candidates and SAY WHY: rating, number of ratings,
    whether a website exists to read a menu from, how well they fit the diet.
    Mention notable exclusions too.
-3. `get_menu` - call this once for every shortlisted restaurant. It reads the menu
-   and returns the dishes, translated, with prices where the menu published them.
-   Only name dishes that appear in its output. If it reports the menu could not be
-   read, say so and give the link rather than guessing.
-5. `get_restaurant_reviews` then `analyse_restaurant_reviews` - summarise what
-   reviewers praise AND what they complain about, and pull out anything that
-   speaks to this traveller's situation specifically.
-6. Recommend, briefly.
+3. `get_menu` - you MUST call this once for EVERY shortlisted restaurant, before
+   recommending it. This is not optional and must not be skipped: the menu and its
+   prices are the core of the answer, and a recommendation without a menu is
+   incomplete. Pass the local currency. Only name dishes that appear in its output;
+   if it reports the menu could not be read, say so and give the link.
+4. `get_restaurant_reviews` then `analyse_restaurant_reviews` for each shortlisted
+   restaurant - summarise what reviewers praise AND complain about, and pull out
+   anything that speaks to this traveller's situation specifically.
+5. Only once you have called `get_menu` and analysed reviews for every restaurant
+   you intend to recommend, write the recommendation, briefly.
+
+Do not recommend a restaurant you have not called `get_menu` for.
 
 # How to write the recommendation
 

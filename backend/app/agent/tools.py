@@ -14,6 +14,7 @@ Returning plain dictionaries keeps tool results easy for the model to read.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 from strands import tool
@@ -176,89 +177,21 @@ async def get_menu(
         and do not name any dishes for that restaurant.
     """
 
-    # A restaurant with no website skips straight to the later sources rather than
-    # being written off; its menu may still exist in a search result or a photo.
-    crawl = (
-        await MenuCrawler().crawl(website_url)
-        if website_url
-        else MenuCrawlResult(website_url="", note="no website is listed")
+    menu, source, note = await _read_menu(
+        restaurant_name=restaurant_name,
+        city=city,
+        restaurant_place_id=restaurant_place_id,
+        currency=currency,
+        website_url=website_url,
+        forbidden_ingredients=forbidden_ingredients or [],
     )
 
-    menu = None
-    source = "the restaurant's website"
-
-    if crawl.has_menu_text:
-        menu = await _extract_menu(
-            raw_text=crawl.text,
-            restaurant_place_id=restaurant_place_id,
-            menu_url=crawl.menu_url,
-            forbidden_ingredients=forbidden_ingredients or [],
-            llm=OpenAIProvider(),
-            fallback_currency=currency,
-        )
-
-    # Fall back to searching the web only when reading the site produced nothing.
-    # Doing this here, rather than leaving it to the agent, means the fallback is
-    # never forgotten and never used unnecessarily.
-    if menu is None or not menu.items:
-        search = await _search_menu_online(
-            restaurant_name=restaurant_name, city=city, website_url=website_url
-        )
-        found = search.get("items") or []
-        if found:
-            source = search.get("source_name") or "a web search"
-            web_menu = Menu(
-                restaurant_place_id=restaurant_place_id,
-                menu_url=search.get("menu_url") or crawl.menu_url,
-                items=[
-                    MenuItem(
-                        name=item.get("name") or "",
-                        description=item.get("description"),
-                        price_amount=item.get("price_amount"),
-                        price_currency=currency if item.get("price_available") else None,
-                        price_available=bool(item.get("price_available")),
-                    )
-                    for item in found
-                    if item.get("name")
-                ],
-            )
-            _menu_cache[restaurant_place_id] = web_menu
-            payload = web_menu.model_dump()
-            payload["menu_available"] = True
-            payload["source"] = source
-            payload["note"] = search.get("note")
-            return payload
-
-        # Last resort: read the menu from a photo on the restaurant's map listing.
-        # Diners often photograph the menu board, and for a restaurant with no
-        # website this can be the only place a menu exists at all. Deliberately
-        # limited to a single photo, since each attempt costs a billed photo
-        # request plus a vision model call.
-        photo_menu = await _menu_from_photo(
-            restaurant_place_id=restaurant_place_id, currency=currency
-        )
-        if photo_menu is not None and photo_menu.items:
-            _menu_cache[restaurant_place_id] = photo_menu
-            payload = photo_menu.model_dump()
-            payload["menu_available"] = True
-            payload["source"] = "a photo of the menu from the restaurant's listing"
-            payload["note"] = (
-                "Transcribed from a customer photo of the menu, so it may be "
-                "incomplete or out of date."
-            )
-            return payload
-
-        no_menu = Menu(
-            restaurant_place_id=restaurant_place_id,
-            menu_url=crawl.menu_url or website_url,
-            retrieval_note=crawl.note or search.get("note") or "No menu could be read.",
-        )
-        _menu_cache[restaurant_place_id] = no_menu
+    if not menu.items:
         return {
             "menu_available": False,
-            "menu_url": no_menu.menu_url,
+            "menu_url": menu.menu_url,
             "items": [],
-            "note": no_menu.retrieval_note,
+            "note": menu.retrieval_note,
             "instruction": (
                 "No menu was read for this restaurant. Do NOT list any dishes for "
                 "it, and do not turn dishes mentioned in reviews into menu items. "
@@ -267,14 +200,96 @@ async def get_menu(
             ),
         }
 
-    _menu_cache[restaurant_place_id] = menu
     payload = menu.model_dump()
     payload["menu_available"] = True
     payload["source"] = source
-    payload["pages_visited"] = crawl.pages_visited
-    if crawl.note:
-        payload["note"] = crawl.note
+    if note:
+        payload["note"] = note
     return payload
+
+
+async def _read_menu(
+    *,
+    restaurant_name: str,
+    city: str,
+    restaurant_place_id: str,
+    currency: str | None,
+    website_url: str | None,
+    forbidden_ingredients: list[str],
+) -> tuple[Menu, str, str | None]:
+    """Read a restaurant's menu, trying every source in turn, and cache the result.
+
+    Returns the menu, a short description of where it came from, and an optional
+    note. The menu's `items` are empty when nothing could be read. Shared by the
+    `get_menu` tool and the assembly-time backfill so both get the identical
+    crawl -> PDF -> web search -> photo pipeline.
+    """
+
+    # A restaurant with no website skips straight to the later sources rather than
+    # being written off; its menu may still exist in a search result or a photo.
+    crawl = (
+        await MenuCrawler().crawl(website_url)
+        if website_url
+        else MenuCrawlResult(website_url="", note="no website is listed")
+    )
+
+    if crawl.has_menu_text:
+        menu = await _extract_menu(
+            raw_text=crawl.text,
+            restaurant_place_id=restaurant_place_id,
+            menu_url=crawl.menu_url,
+            forbidden_ingredients=forbidden_ingredients,
+            llm=OpenAIProvider(),
+            fallback_currency=currency,
+        )
+        if menu.items:
+            _menu_cache[restaurant_place_id] = menu
+            return menu, "the restaurant's website", crawl.note
+
+    # Web search fallback, only when reading the site produced nothing.
+    search = await _search_menu_online(
+        restaurant_name=restaurant_name, city=city, website_url=website_url
+    )
+    found = search.get("items") or []
+    if found:
+        web_menu = Menu(
+            restaurant_place_id=restaurant_place_id,
+            menu_url=search.get("menu_url") or crawl.menu_url,
+            items=[
+                MenuItem(
+                    name=item.get("name") or "",
+                    description=item.get("description"),
+                    price_amount=item.get("price_amount"),
+                    price_currency=currency if item.get("price_available") else None,
+                    price_available=bool(item.get("price_available")),
+                )
+                for item in found
+                if item.get("name")
+            ],
+        )
+        _menu_cache[restaurant_place_id] = web_menu
+        return web_menu, (search.get("source_name") or "a web search"), search.get("note")
+
+    # Last resort: a menu photo from the map listing.
+    photo_menu = await _menu_from_photo(
+        restaurant_place_id=restaurant_place_id, currency=currency
+    )
+    if photo_menu is not None and photo_menu.items:
+        _menu_cache[restaurant_place_id] = photo_menu
+        return (
+            photo_menu,
+            "a photo of the menu from the restaurant's listing",
+            "Transcribed from a customer photo of the menu, so it may be incomplete "
+            "or out of date.",
+        )
+
+    no_menu = Menu(
+        restaurant_place_id=restaurant_place_id,
+        menu_url=crawl.menu_url or website_url,
+        retrieval_note=crawl.note or search.get("note") or "No menu could be read.",
+    )
+    _menu_cache[restaurant_place_id] = no_menu
+    return no_menu, "", no_menu.retrieval_note
 
 
 @tool
@@ -419,7 +434,24 @@ async def assemble_suggestion(
     if restaurant is None:
         return None
 
+    # Read the menu here if the agent did not during its run. Like reviews, a menu
+    # should be on every recommended card, but being autonomous the agent sometimes
+    # recommends restaurants without having called get_menu (it may stop after
+    # discovery). Backfilling in code guarantees the card is not left menu-less.
     menu = _menu_cache.get(pick.place_id)
+    if menu is None:
+        # Currency is unknown here (the agent, which supplies it, was not involved),
+        # so prices are read without one; the common paths still run through the
+        # agent's own get_menu call where currency is known.
+        menu, _, _ = await _read_menu(
+            restaurant_name=restaurant.name,
+            city=restaurant.address or "",
+            restaurant_place_id=restaurant.place_id,
+            currency=None,
+            website_url=restaurant.website_url,
+            forbidden_ingredients=[],
+        )
+
     all_items = menu.items if menu else []
 
     # Match the model's chosen dish names against the actual menu, case-insensitively
@@ -524,49 +556,92 @@ async def assemble_suggestions(
             suggestions.append(built)
 
     return SuggestionList(
-        suggestions=await asyncio.gather(*(_verify_language(s) for s in suggestions))
+        suggestions=[await _verify_language(s) for s in suggestions]
     )
+
+
+async def _verify_segments(segments: list[str]) -> list[str] | None:
+    """Verify a card's prose segments as one block; return corrected list or None.
+
+    The segments are numbered and checked together in a single call. Returns None
+    when there is nothing to check, when the text was already correct, or when the
+    corrected block does not split back into the same number of segments (so a
+    mangled correction can never silently reshape the card).
+    """
+
+    if not any(s.strip() for s in segments):
+        return None
+
+    numbered = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(segments))
+    corrected = await ensure_language(numbered, OpenAIProvider())
+    if corrected == numbered:
+        return None
+
+    # Parse the numbered lines back out, tolerating wrapped lines by attaching them
+    # to the current item.
+    parsed: list[str] = []
+    for line in corrected.splitlines():
+        match = re.match(r"^\s*(\d+)\.\s?(.*)$", line)
+        if match:
+            parsed.append(match.group(2).strip())
+        elif parsed:
+            parsed[-1] = f"{parsed[-1]} {line.strip()}".strip()
+
+    return parsed if len(parsed) == len(segments) else None
 
 
 async def _verify_language(suggestion: Suggestion) -> Suggestion:
     """Correct any part of a card that is not in the expected language.
 
-    Only the prose the application generated is checked. Dish names are left alone:
-    they are what is printed on the menu, and a diner needs to be able to point at
-    them.
+    All of the card's generated prose is verified in a single call — the reasoning,
+    the caveats and the review points together — rather than one call per field, so
+    a card costs one check rather than a dozen. `ensure_language` returns the text
+    unchanged when it is already correct, so the common case adds only that one
+    cheap call. Dish names are deliberately excluded: they are what is printed on
+    the menu, and a diner needs to be able to point at them.
     """
 
-    llm = OpenAIProvider()
-
-    async def fix(text: str) -> str:
-        return await ensure_language(text, llm)
-
-    async def fix_all(items: list[str]) -> list[str]:
-        if not items:
-            return items
-        # Checked as one block so a list costs a single call rather than one each.
-        joined = "\n".join(f"- {item}" for item in items)
-        corrected = await ensure_language(joined, llm)
-        lines = [line.lstrip("- ").strip() for line in corrected.splitlines()]
-        cleaned = [line for line in lines if line]
-        # Fall back to the original if the shape changed, so a mangled correction
-        # cannot silently drop points.
-        return cleaned if len(cleaned) == len(items) else items
-
     insight = suggestion.review_insight
+
+    # Collect every prose field into one numbered block, remembering where each
+    # piece came from so the corrected block can be split back out.
+    segments: list[str] = [suggestion.reasoning, *suggestion.caveats]
+    counts = {"reasoning": 1, "caveats": len(suggestion.caveats)}
+    if insight is not None:
+        segments += insight.positive_points + insight.negative_points + insight.context_matches
+        counts["positive"] = len(insight.positive_points)
+        counts["negative"] = len(insight.negative_points)
+        counts["context"] = len(insight.context_matches)
+
+    fixed = await _verify_segments(segments)
+    if fixed is None:  # Unchanged or unrecoverable; keep the card as built.
+        return suggestion
+
+    # Split the corrected segments back into their fields, in the same order.
+    cursor = 0
+
+    def take(n: int) -> list[str]:
+        nonlocal cursor
+        chunk = fixed[cursor : cursor + n]
+        cursor += n
+        return chunk
+
+    reasoning = take(1)[0]
+    caveats = take(counts["caveats"])
+
     if insight is not None:
         insight = insight.model_copy(
             update={
-                "positive_points": await fix_all(insight.positive_points),
-                "negative_points": await fix_all(insight.negative_points),
-                "context_matches": await fix_all(insight.context_matches),
+                "positive_points": take(counts["positive"]),
+                "negative_points": take(counts["negative"]),
+                "context_matches": take(counts["context"]),
             }
         )
 
     return suggestion.model_copy(
         update={
-            "reasoning": await fix(suggestion.reasoning),
-            "caveats": await fix_all(suggestion.caveats),
+            "reasoning": reasoning,
+            "caveats": caveats,
             "review_insight": insight,
         }
     )
