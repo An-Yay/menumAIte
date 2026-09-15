@@ -18,6 +18,7 @@ from strands.models.openai import OpenAIModel
 from app.agent.prompt import SYSTEM_PROMPT
 from app.agent.tools import AGENT_TOOLS, assemble_suggestions
 from app.config import get_settings
+from app.language import current_language
 from app.models import SuggestionList, SuggestionPickList
 from app.providers.llm import LLMError
 
@@ -103,10 +104,9 @@ async def extract_suggestions(
     missing card view should degrade quietly rather than surface an error.
     """
 
-    # The finalize call runs on the same agent, with the whole conversation in its
-    # history, so it can be told to reuse "the same language you have used" rather
-    # than being handed a language code (which the app does not reliably track).
-    prompt = _FINALIZE_PROMPT.format(language="the same language you have used with the traveller")
+    # The language was established for this message before the agent ran, so it is
+    # named explicitly here rather than left to the model to infer.
+    prompt = _FINALIZE_PROMPT.format(language=current_language())
 
     try:
         picks = await agent.structured_output_async(SuggestionPickList, prompt)

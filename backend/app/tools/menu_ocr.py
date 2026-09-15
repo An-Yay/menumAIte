@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 
 from app.config import get_settings
+from app.language import current_language
 from app.providers.llm import LLMError, extract_json
 
 _CHAT_URL = "https://api.openai.com/v1/chat/completions"
@@ -52,9 +53,7 @@ Reply with only a JSON object, no prose and no markdown fences:
 }"""
 
 
-async def read_menu_from_photo(
-    *, photo_url: str, output_language: str = "en"
-) -> dict[str, Any]:
+async def read_menu_from_photo(*, photo_url: str) -> dict[str, Any]:
     """Transcribe a menu from a single photo.
 
     Returns the parsed structure described in `_SYSTEM`, plus an `attempted` flag.
@@ -98,7 +97,7 @@ async def read_menu_from_photo(
                         "type": "text",
                         "text": (
                             f"Transcribe any menu in this photo. Write dish names as "
-                            f"printed, and translate descriptions into {output_language}."
+                            f"printed, and translate descriptions into {current_language()}."
                         ),
                     },
                     {"type": "image_url", "image_url": {"url": data_url}},

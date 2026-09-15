@@ -13,11 +13,13 @@ Returning plain dictionaries keeps tool results easy for the model to read.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from strands import tool
 
 from app.crawler.menu_crawler import MenuCrawler, MenuCrawlResult
+from app.language import current_language, ensure_language
 from app.models import (
     Menu,
     MenuItem,
@@ -55,7 +57,14 @@ _MAX_MENU_PHOTOS = 3
 _restaurant_cache: dict[str, Restaurant] = {}
 _menu_cache: dict[str, Menu] = {}
 _review_cache: dict[str, list[Review]] = {}
-_review_insight_cache: dict[str, ReviewInsight] = {}
+
+# Review summaries are keyed by place id AND the request they were written for,
+# because the summary text is written in the traveller's language. Keying on the
+# place alone meant a summary produced for an earlier German request was reused
+# verbatim for a later Hinglish one, so a card showed German review points under
+# Hinglish prose. The raw reviews above are language-neutral and stay keyed by
+# place id alone.
+_review_insight_cache: dict[tuple[str, str], ReviewInsight] = {}
 
 
 @tool
@@ -86,7 +95,6 @@ async def discover_restaurants(
     dietary_requirements: list[str] | None = None,
     area: str | None = None,
     cuisine_preferences: list[str] | None = None,
-    output_language: str = "en",
     limit: int = 8,
 ) -> dict[str, Any]:
     """Find candidate restaurants for a city, meal occasion and diet.
@@ -100,7 +108,6 @@ async def discover_restaurants(
         dietary_requirements: Dietary labels, e.g. ["vegetarian"].
         area: Optional neighbourhood or landmark to search near.
         cuisine_preferences: Optional cuisines or extra search terms.
-        output_language: Language code for returned content, e.g. "de".
         limit: How many candidates to return.
 
     Returns:
@@ -115,7 +122,7 @@ async def discover_restaurants(
         dietary_requirements=dietary_requirements or [],
         area=area,
         cuisine_preferences=cuisine_preferences or [],
-        output_language=output_language,
+        output_language=current_language(),
     )
 
     provider = GooglePlacesProvider()
@@ -137,7 +144,6 @@ async def get_menu(
     restaurant_place_id: str,
     currency: str,
     website_url: str | None = None,
-    output_language: str = "en",
     forbidden_ingredients: list[str] | None = None,
 ) -> dict[str, Any]:
     """Read a restaurant's menu and return its dishes, translated and priced.
@@ -156,7 +162,6 @@ async def get_menu(
         currency: ISO 4217 code for the local currency, e.g. "EUR" in Barcelona,
             "AUD" in Sydney, "INR" in Mumbai. Menus often print prices with no
             currency, so this is attached to them.
-        output_language: Language to translate dishes into.
         forbidden_ingredients: Ingredients the traveller avoids, used to flag each
             dish as suitable or not.
 
@@ -187,7 +192,6 @@ async def get_menu(
             raw_text=crawl.text,
             restaurant_place_id=restaurant_place_id,
             menu_url=crawl.menu_url,
-            output_language=output_language,
             forbidden_ingredients=forbidden_ingredients or [],
             llm=OpenAIProvider(),
             fallback_currency=currency,
@@ -231,9 +235,7 @@ async def get_menu(
         # limited to a single photo, since each attempt costs a billed photo
         # request plus a vision model call.
         photo_menu = await _menu_from_photo(
-            restaurant_place_id=restaurant_place_id,
-            currency=currency,
-            output_language=output_language,
+            restaurant_place_id=restaurant_place_id, currency=currency
         )
         if photo_menu is not None and photo_menu.items:
             _menu_cache[restaurant_place_id] = photo_menu
@@ -324,13 +326,11 @@ async def analyse_restaurant_reviews(place_id: str, context: str) -> dict[str, A
         context=context,
         llm=OpenAIProvider(),
     )
-    _review_insight_cache[place_id] = insight
+    _review_insight_cache[(place_id, context)] = insight
     return insight.model_dump()
 
 
-async def _menu_from_photo(
-    *, restaurant_place_id: str, currency: str, output_language: str
-) -> Menu | None:
+async def _menu_from_photo(*, restaurant_place_id: str, currency: str) -> Menu | None:
     """Try to read a menu from one photo on the restaurant's map listing.
 
     Returns None when no photo is available or none of it could be read, so the
@@ -350,9 +350,7 @@ async def _menu_from_photo(
     # usual cost at a single call while giving a realistic chance of finding one.
     found: list[dict[str, Any]] = []
     for photo_url in photo_urls:
-        result = await _read_menu_from_photo(
-            photo_url=photo_url, output_language=output_language
-        )
+        result = await _read_menu_from_photo(photo_url=photo_url)
         found = result.get("items") or []
         if found:
             break
@@ -499,7 +497,7 @@ async def _ensure_review_insight(
             context=context,
             llm=OpenAIProvider(),
         )
-        _review_insight_cache[place_id] = insight
+        _review_insight_cache[(place_id, context)] = insight
         return insight
     except Exception:  # noqa: BLE001 - reviews are best-effort, never fatal
         return None
@@ -512,6 +510,11 @@ async def assemble_suggestions(
 
     `review_context` is used only when a card is missing its review summary and the
     reviews have to be fetched here as a fallback.
+
+    The finished cards are then checked for language, because a card is assembled
+    from several separate model calls and any one of them can slip into the wrong
+    language — most often the review summary echoing the language of the reviews it
+    read.
     """
 
     suggestions: list[Suggestion] = []
@@ -519,7 +522,54 @@ async def assemble_suggestions(
         built = await assemble_suggestion(pick, review_context=review_context)
         if built is not None:
             suggestions.append(built)
-    return SuggestionList(suggestions=suggestions)
+
+    return SuggestionList(
+        suggestions=await asyncio.gather(*(_verify_language(s) for s in suggestions))
+    )
+
+
+async def _verify_language(suggestion: Suggestion) -> Suggestion:
+    """Correct any part of a card that is not in the expected language.
+
+    Only the prose the application generated is checked. Dish names are left alone:
+    they are what is printed on the menu, and a diner needs to be able to point at
+    them.
+    """
+
+    llm = OpenAIProvider()
+
+    async def fix(text: str) -> str:
+        return await ensure_language(text, llm)
+
+    async def fix_all(items: list[str]) -> list[str]:
+        if not items:
+            return items
+        # Checked as one block so a list costs a single call rather than one each.
+        joined = "\n".join(f"- {item}" for item in items)
+        corrected = await ensure_language(joined, llm)
+        lines = [line.lstrip("- ").strip() for line in corrected.splitlines()]
+        cleaned = [line for line in lines if line]
+        # Fall back to the original if the shape changed, so a mangled correction
+        # cannot silently drop points.
+        return cleaned if len(cleaned) == len(items) else items
+
+    insight = suggestion.review_insight
+    if insight is not None:
+        insight = insight.model_copy(
+            update={
+                "positive_points": await fix_all(insight.positive_points),
+                "negative_points": await fix_all(insight.negative_points),
+                "context_matches": await fix_all(insight.context_matches),
+            }
+        )
+
+    return suggestion.model_copy(
+        update={
+            "reasoning": await fix(suggestion.reasoning),
+            "caveats": await fix_all(suggestion.caveats),
+            "review_insight": insight,
+        }
+    )
 
 
 # The toolset handed to the agent.

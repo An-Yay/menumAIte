@@ -24,7 +24,9 @@ from strands import Agent
 
 from app.agent.agent import build_agent, extract_suggestions
 from app.api.events import EventTranslator
+from app.language import detect_language, ensure_language, set_language
 from app.models import COMMON_MEALS
+from app.providers.llm import OpenAIProvider
 from app.telemetry import collected_generations, start_collecting
 
 router = APIRouter(tags=["chat"])
@@ -83,21 +85,59 @@ async def _stream(message: str, session_id: str) -> AsyncIterator[str]:
     yield _sse(translator.start())
 
     try:
+        # Establish the language for this message before anything else runs, and
+        # record it so every component downstream (menu translation, review
+        # summaries, recommendation cards) writes in the same language. Detected per
+        # message rather than once per conversation, so a traveller who switches
+        # language mid-conversation is followed.
+        language = await detect_language(message, OpenAIProvider())
+        set_language(language)
+
         agent = _get_agent(session_id)
-        async for event in agent.stream_async(message):
+
+        # The language is stated alongside the message rather than only in the
+        # system prompt, so it is present in the immediate context of the turn the
+        # agent is answering.
+        prompt = f"[Answer in {language}]\n\n{message}"
+
+        # The agent's prose reply is held back rather than streamed straight
+        # through. When the turn produces recommendation cards, that prose only
+        # repeats, less precisely, what the cards already show, so it is dropped and
+        # the traveller gets the cards without first waiting through a summary.
+        # When the turn produces no cards - a clarifying question, or nothing found -
+        # the prose is the entire answer and is released.
+        #
+        # Reasoning observations still stream live, so progress stays visible while
+        # this is being decided.
+        final_text = ""
+        async for event in agent.stream_async(prompt):
             for translated in translator.translate(event):
+                kind = translated.get("type")
+                if kind == "text":
+                    # Held back; the complete reply arrives in the "final" event.
+                    continue
+                if kind == "final":
+                    final_text = translated.get("text", "")
+                    continue
                 yield _sse(translated)
 
-        # After the reply, derive structured recommendations from the same
-        # conversation so the interface can render restaurant cards. This is
-        # skipped for turns that did not produce recommendations (for example a
-        # clarifying question), where there is nothing to structure.
         suggestions = await extract_suggestions(agent, review_context=message)
         if suggestions.suggestions:
             yield _sse(
                 {
                     "type": "suggestions",
-                    "suggestions": [s.model_dump(mode="json") for s in suggestions.suggestions],
+                    "suggestions": [
+                        s.model_dump(mode="json") for s in suggestions.suggestions
+                    ],
+                }
+            )
+        elif final_text:
+            # Verified before sending, so a reply that slipped into the wrong
+            # language is corrected rather than shown.
+            yield _sse(
+                {
+                    "type": "final",
+                    "text": await ensure_language(final_text, OpenAIProvider(), language),
                 }
             )
 

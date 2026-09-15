@@ -152,10 +152,12 @@ class GooglePlacesProvider:
             "maxResultCount": min(limit, 20),
         }
 
-        # Ask the provider to return content in the traveller's language where it
-        # can, which reduces how much we need to translate later.
-        if brief.output_language:
-            payload["languageCode"] = brief.output_language
+        # `languageCode` is deliberately not sent. It only affects the language of
+        # returned place names, and it requires a BCP-47 code, whereas the app now
+        # tracks the traveller's language as a human-readable description (which can
+        # be something like "Hinglish" that has no clean code). Translation of the
+        # content that matters — menus, review summaries, recommendations — is done
+        # by the application itself.
 
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:

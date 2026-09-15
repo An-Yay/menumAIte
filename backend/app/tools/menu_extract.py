@@ -16,6 +16,7 @@ Two rules are enforced through the prompt and the output model:
 
 from __future__ import annotations
 
+from app.language import current_language
 from app.models import Menu, MenuItem
 from app.providers.llm import LLMError, LLMProvider
 
@@ -26,23 +27,17 @@ Rules:
 - Include a price ONLY if the text clearly states one for that dish. If no price
   is shown, set price_available to false and leave price_amount null. Never guess
   a price.
-- Translate each dish name and description into the requested output language,
-  and also keep the original name.
+- Translate each dish name and description into the language named in the prompt,
+  and also keep the original name as printed.
 - Tag dishes with dietary properties you can infer (e.g. "vegan", "contains
   nuts"). Only tag "vegan" or "vegetarian" when the dish genuinely is; never tag a
   meat, poultry, fish or seafood dish as vegetarian or vegan.
-- Set matches_requirements per dish, but judge it correctly:
-  - A forbidden ingredient means the dish must not CONTAIN that ingredient. A dish
-    that simply lacks it still matches.
-  - For halal/kosher, the constraint is about specific excluded items (e.g. pork,
-    alcohol) and preparation, NOT about avoiding meat. Beef, lamb, chicken and
-    fish are all allowed for a halal or kosher diner. Do NOT mark a meat dish as
-    non-matching just because it contains meat. Whether the meat is halal/kosher
-    cannot be told from a menu, so use null (unclear) for a permitted meat dish
-    rather than false.
-  - Use false only when a dish clearly contains a forbidden ingredient (e.g. a
-    pork dish for a halal diner, or nuts for a nut allergy).
-  - Use null when genuinely unclear.
+- Set matches_requirements per dish, judging only what the menu actually tells you:
+  - false when the dish clearly contains something on the forbidden list.
+  - true when the dish clearly contains nothing on the forbidden list.
+  - null when the menu does not say enough to decide, including when suitability
+    depends on how the dish was prepared or sourced rather than on its listed
+    ingredients. Do not infer a restriction the forbidden list does not state.
 - Detect the source language of the menu.
 Reply with a single JSON object and nothing else."""
 
@@ -96,7 +91,6 @@ async def extract_and_translate_menu(
     raw_text: str,
     restaurant_place_id: str,
     menu_url: str | None,
-    output_language: str,
     forbidden_ingredients: list[str],
     llm: LLMProvider,
     max_items: int = 40,
@@ -116,8 +110,12 @@ async def extract_and_translate_menu(
         )
 
     forbidden = ", ".join(forbidden_ingredients) if forbidden_ingredients else "none"
+    # The language is established once per message; using it here rather than a
+    # caller-supplied code keeps dish names in the same language as the rest of the
+    # reply.
+    language = current_language()
     prompt = (
-        f"Output language: {output_language}\n"
+        f"Translate dish names and descriptions into {language}.\n"
         f"Traveller's forbidden ingredients: {forbidden}\n\n"
         "Menu text follows between the markers.\n"
         "----- MENU TEXT START -----\n"
@@ -151,9 +149,12 @@ async def extract_and_translate_menu(
         for item in raw_items[:max_items]
     ]
 
-    source_language = data.get("source_language")
+    # The menu counts as translated when its own language is not the language the
+    # reply is being written in. Compared loosely (a substring check) because the
+    # source is a code like "ca" while the target is a description like "English".
+    source_language = data.get("source_language") or ""
     was_translated = bool(
-        source_language and source_language.split("-")[0] != output_language.split("-")[0]
+        source_language and source_language.lower()[:2] not in language.lower()
     )
 
     return Menu(
